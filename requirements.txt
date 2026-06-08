@@ -1,0 +1,8 @@
+streamlit>=1.40
+pandas
+numpy
+plotly
+openpyxl
+fpdf2
+gspread
+google-auth

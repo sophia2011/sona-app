@@ -1,0 +1,6 @@
+cob_data.db
+comprobantes/
+.gcp_service_account.json
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
