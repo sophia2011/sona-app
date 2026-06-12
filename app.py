@@ -605,6 +605,14 @@ def puede(rol: str, accion: str) -> bool:
     return PERMISOS.get(rol, {}).get(accion, False)
 
 
+def verificar_clave_admin(clave_ingresada) -> bool:
+    """True si la clave coincide con la del Administrador (o si no hay clave configurada)."""
+    h = cfg_get("admin_pass_hash")
+    if not h:
+        return True
+    return bool(clave_ingresada) and _hash(clave_ingresada) == h
+
+
 def pantalla_login():
     """Pantalla de acceso. El Administrador entra libre; los demás con clave."""
     st.markdown("## 🔐 Acceso a Constructor PRO")
@@ -1206,6 +1214,43 @@ def vista_usuarios(rol: str):
             st.success(f"Usuario «{nombre}» creado con rol {rol_u}."); st.rerun()
 
     if not usuarios.empty:
+        st.markdown("---")
+        st.markdown("#### ✏️ Modificar un usuario")
+        st.caption("Para guardar cambios se solicita la clave del Administrador. "
+                   "(La contraseña de acceso del usuario se cambia en «Restablecer la clave».)")
+        um_sel = st.selectbox("Selecciona el usuario a modificar", usuarios["nombre"].tolist(),
+                              key="user_edit_sel")
+        u = usuarios[usuarios["nombre"] == um_sel].iloc[0]
+        with st.form("form_user_editar"):
+            col1, col2 = st.columns(2)
+            with col1:
+                e_codigo = st.text_input("Clave / código", value=u["codigo"] or "")
+                e_nombre = st.text_input("Nombre completo", value=u["nombre"] or "")
+                rol_idx = ROLES_ASIGNABLES.index(u["rol"]) if u["rol"] in ROLES_ASIGNABLES else 0
+                e_rol = st.selectbox("Rol", ROLES_ASIGNABLES, index=rol_idx)
+            with col2:
+                e_tel = st.text_input("Teléfono", value=u["telefono"] or "")
+                e_correo = st.text_input("Correo", value=u["correo"] or "")
+                obra_op2 = ["(Todas / sin asignar)"] + (obras["nombre"].tolist()
+                                                        if not obras.empty else [])
+                obra_actual = u["obra"] if pd.notna(u["obra"]) else "(Todas / sin asignar)"
+                obra_idx = obra_op2.index(obra_actual) if obra_actual in obra_op2 else 0
+                e_obra = st.selectbox("Obra asignada", obra_op2, index=obra_idx)
+            clave_adm = st.text_input("Clave del Administrador", type="password",
+                                      key="user_edit_clave")
+            if st.form_submit_button("💾 Guardar cambios del usuario") and e_nombre.strip():
+                if not verificar_clave_admin(clave_adm):
+                    st.error("Clave del Administrador incorrecta. No se guardaron los cambios.")
+                else:
+                    oid = (obra_id_por_nombre(e_obra)
+                           if e_obra != "(Todas / sin asignar)" else None)
+                    ejecutar("UPDATE usuarios SET codigo=?, nombre=?, rol=?, telefono=?, "
+                             "correo=?, obra_id=? WHERE id=?",
+                             (e_codigo.strip(), e_nombre.strip(), e_rol, e_tel, e_correo, oid,
+                              int(u["id"])))
+                    st.success(f"Usuario «{e_nombre}» actualizado."); st.rerun()
+
+    if not usuarios.empty:
         st.markdown("#### Restablecer la clave de un usuario")
         with st.form("form_reset_clave"):
             u_sel = st.selectbox("Usuario", usuarios["nombre"].tolist())
@@ -1328,6 +1373,44 @@ def vista_obras(rol: str):
                          (oid, et, i.isoformat(), f.isoformat(), "Por iniciar", 0))
             st.success(f"Obra «{nombre}» creada con sus etapas base."); st.rerun()
 
+    # ----- Modificar una obra existente (solo Administrador, con su clave) -----
+    if not obras.empty:
+        st.markdown("---")
+        st.markdown("#### ✏️ Modificar una obra")
+        st.caption("Para guardar cambios se solicita la clave del Administrador.")
+        ob_labels, ob_map = opciones_clave(obras)
+        ob_lbl = st.selectbox("Selecciona la obra a modificar", ob_labels, key="ob_edit_sel")
+        o = obras[obras["nombre"] == ob_map[ob_lbl]].iloc[0]
+        with st.form("form_obra_editar"):
+            col1, col2 = st.columns(2)
+            with col1:
+                e_codigo = st.text_input("Clave de la obra", value=o["codigo"] or "")
+                e_nombre = st.text_input("Nombre de la obra", value=o["nombre"] or "")
+                cli_list = clientes["empresa"].tolist()
+                cli_idx = cli_list.index(o["cliente"]) if o["cliente"] in cli_list else 0
+                e_cliente = st.selectbox("Cliente", cli_list, index=cli_idx)
+                e_ubic = st.text_input("Ubicación", value=o["ubicacion"] or "")
+                e_ing = st.text_input("Responsable de obra", value=o["ingeniero"] or "")
+            with col2:
+                e_pres = st.number_input("Presupuesto ($ MXN)", min_value=0.0, step=10000.0,
+                                         value=float(o["presupuesto"] or 0))
+                e_estatus = st.selectbox("Estatus", ["En proceso", "Detenida", "Terminada"],
+                                         index=["En proceso", "Detenida", "Terminada"].index(
+                                             o["estatus"]) if o["estatus"] in
+                                         ["En proceso", "Detenida", "Terminada"] else 0)
+                clave_adm = st.text_input("Clave del Administrador", type="password",
+                                          key="ob_edit_clave")
+            if st.form_submit_button("💾 Guardar cambios de la obra") and e_nombre.strip():
+                if not verificar_clave_admin(clave_adm):
+                    st.error("Clave del Administrador incorrecta. No se guardaron los cambios.")
+                else:
+                    cid = int(clientes[clientes["empresa"] == e_cliente]["id"].iloc[0])
+                    ejecutar("UPDATE obras SET codigo=?, nombre=?, cliente_id=?, ubicacion=?, "
+                             "ingeniero=?, presupuesto=?, estatus=? WHERE id=?",
+                             (e_codigo.strip(), e_nombre.strip(), cid, e_ubic, e_ing, e_pres,
+                              e_estatus, int(o["id"])))
+                    st.success(f"Obra «{e_nombre}» actualizada."); st.rerun()
+
 
 def vista_contratistas(rol: str):
     st.subheader("👷 Contratistas · Alta y asignación a obra")
@@ -1391,6 +1474,36 @@ def vista_contratistas(rol: str):
                          "pagado,avance,estatus) VALUES(?,?,?,?,?,?,?)",
                          (oid, c_map[contr_lbl], concepto.strip(), monto, anticipo, avance, "En proceso"))
                 st.success(f"«{c_map[contr_lbl]}» asignado a «{o_map[obra_lbl]}»."); st.rerun()
+
+    # ----- Modificar un contratista existente (solo Administrador, con su clave) -----
+    if puede(rol, "admin") and not contr.empty:
+        st.markdown("---")
+        st.markdown("#### ✏️ Modificar un contratista")
+        st.caption("Para guardar cambios se solicita la clave del Administrador.")
+        cm_labels, cm_map = opciones_clave(contr)
+        cm_lbl = st.selectbox("Selecciona el contratista a modificar", cm_labels,
+                              key="contr_edit_sel")
+        cc = contr[contr["nombre"] == cm_map[cm_lbl]].iloc[0]
+        with st.form("form_contr_editar"):
+            col1, col2 = st.columns(2)
+            with col1:
+                e_codigo = st.text_input("Clave del contratista", value=cc["codigo"] or "")
+                e_nombre = st.text_input("Nombre del contratista", value=cc["nombre"] or "")
+                e_esp = st.text_input("Especialidad", value=cc["especialidad"] or "")
+            with col2:
+                e_tel = st.text_input("Teléfono", value=cc["telefono"] or "")
+                e_correo = st.text_input("Correo", value=cc["correo"] or "")
+                clave_adm = st.text_input("Clave del Administrador", type="password",
+                                          key="contr_edit_clave")
+            if st.form_submit_button("💾 Guardar cambios del contratista") and e_nombre.strip():
+                if not verificar_clave_admin(clave_adm):
+                    st.error("Clave del Administrador incorrecta. No se guardaron los cambios.")
+                else:
+                    ejecutar("UPDATE contratistas SET codigo=?, nombre=?, especialidad=?, "
+                             "telefono=?, correo=? WHERE id=?",
+                             (e_codigo.strip(), e_nombre.strip(), e_esp, e_tel, e_correo,
+                              int(cc["id"])))
+                    st.success(f"Contratista «{e_nombre}» actualizado."); st.rerun()
 
 
 def vista_presupuesto(obra_id: int, rol: str):
