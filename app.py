@@ -594,10 +594,10 @@ ROLES_ASIGNABLES = ["Departamento de Control", "Ingeniero de Obra", "Supervisor"
 
 PERMISOS = {
     "Administrador":           {"ver": True, "editar": True,  "crm": True,  "admin": True,  "usuarios": True,  "todas_obras": True},
-    "Departamento de Control": {"ver": True, "editar": True,  "crm": True,  "admin": False, "usuarios": False, "todas_obras": True},
+    "Departamento de Control": {"ver": True, "editar": True,  "crm": True,  "admin": False, "usuarios": False, "todas_obras": False},
     "Ingeniero de Obra":       {"ver": True, "editar": True,  "crm": False, "admin": False, "usuarios": False, "todas_obras": False},
     "Supervisor":              {"ver": True, "editar": True,  "crm": False, "admin": False, "usuarios": False, "todas_obras": False},
-    "Cliente":                 {"ver": True, "editar": False, "crm": False, "admin": False, "usuarios": False, "todas_obras": True},
+    "Cliente":                 {"ver": True, "editar": False, "crm": False, "admin": False, "usuarios": False, "todas_obras": False},
 }
 
 
@@ -1043,6 +1043,32 @@ def vista_crm(rol: str):
                      "VALUES(?,?,?,?,?,?)", (empresa.strip(), contacto, telefono, correo, tipo, notas))
             st.success(f"Cliente «{empresa}» guardado."); st.rerun()
 
+    if not clientes.empty:
+        st.markdown("---")
+        st.markdown("#### ✏️ Modificar un cliente")
+        st.caption("Si registraste un cliente con datos incompletos, aquí puedes completarlos "
+                   "o corregirlos después.")
+        emp_sel = st.selectbox("Selecciona el cliente a modificar",
+                               clientes["empresa"].tolist(), key="crm_edit_sel")
+        c = clientes[clientes["empresa"] == emp_sel].iloc[0]
+        with st.form("form_cliente_editar"):
+            col1, col2 = st.columns(2)
+            with col1:
+                e_empresa = st.text_input("Empresa", value=c["empresa"] or "")
+                e_contacto = st.text_input("Contacto", value=c["contacto"] or "")
+                e_telefono = st.text_input("Teléfono", value=c["telefono"] or "")
+            with col2:
+                e_correo = st.text_input("Correo", value=c["correo"] or "")
+                tipo_idx = TIPO_CLIENTE.index(c["tipo"]) if c["tipo"] in TIPO_CLIENTE else 0
+                e_tipo = st.selectbox("Tipo", TIPO_CLIENTE, index=tipo_idx)
+                e_notas = st.text_input("Notas", value=c["notas"] or "")
+            if st.form_submit_button("💾 Guardar cambios") and e_empresa.strip():
+                ejecutar("UPDATE clientes SET empresa=?, contacto=?, telefono=?, correo=?, "
+                         "tipo=?, notas=? WHERE id=?",
+                         (e_empresa.strip(), e_contacto, e_telefono, e_correo, e_tipo,
+                          e_notas, int(c["id"])))
+                st.success(f"Datos de «{e_empresa}» actualizados."); st.rerun()
+
 
 def vista_respaldo(rol: str):
     st.subheader("💾 Respaldo / Exportar a Excel")
@@ -1261,8 +1287,8 @@ def vista_obras(rol: str):
                      width="stretch", hide_index=True)
     else:
         st.caption("Aún no hay obras registradas. Crea la primera abajo.")
-    if not puede(rol, "editar"):
-        st.info("Solo Administrador o Ingeniero pueden dar de alta obras."); return
+    if not puede(rol, "admin"):
+        st.info("Solo el Administrador puede dar de alta o modificar obras."); return
     st.markdown("#### Dar de alta una nueva obra")
     clientes = obtener_clientes()
     if clientes.empty:
@@ -1716,11 +1742,14 @@ def vista_editar(obra_id: int, rol: str, usuario: str):
     tabs = st.tabs(["Obras", "Clientes", "Proveedores", "Contratistas", "Compras",
                     "Presupuesto", "Destajos", "Requisiciones", "Etapas", "Bitácora", "Usuarios"])
     with tabs[0]:
-        st.markdown("##### Obras  ⚠️ *borrar una obra elimina también sus datos asociados*")
-        df = consultar("SELECT id,codigo,nombre,ubicacion,ingeniero,presupuesto,fecha_inicio,"
-                       "fecha_fin,estatus FROM obras ORDER BY id")
-        editor_tabla("obras", "obras", df, ["codigo", "nombre", "ubicacion", "ingeniero",
-                     "presupuesto", "fecha_inicio", "fecha_fin", "estatus"])
+        if not puede(rol, "admin"):
+            st.caption("Solo el Administrador puede editar o borrar obras.")
+        else:
+            st.markdown("##### Obras  ⚠️ *borrar una obra elimina también sus datos asociados*")
+            df = consultar("SELECT id,codigo,nombre,ubicacion,ingeniero,presupuesto,fecha_inicio,"
+                           "fecha_fin,estatus FROM obras ORDER BY id")
+            editor_tabla("obras", "obras", df, ["codigo", "nombre", "ubicacion", "ingeniero",
+                         "presupuesto", "fecha_inicio", "fecha_fin", "estatus"])
     with tabs[1]:
         if not puede(rol, "crm"):
             st.caption("Solo el Administrador puede editar clientes.")
@@ -1958,9 +1987,11 @@ def main():
                          else "Pide al Administrador que te asigne una."))
     obra_id = obra_id_por_nombre(obra_nombre)
 
-    secciones = ["Dashboard", "Obras", "Proveedores", "Contratistas", "Compras",
+    secciones = ["Dashboard", "Proveedores", "Contratistas", "Compras",
                  "Presupuesto", "Requisiciones", "Destajos", "Avances y Bitácora",
                  "Editar / Borrar", "Reportes"]
+    if puede(rol, "admin"):
+        secciones.insert(1, "Obras")
     if puede(rol, "crm"):
         secciones.insert(1, "CRM")
     if puede(rol, "usuarios"):
