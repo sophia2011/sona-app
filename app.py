@@ -294,12 +294,31 @@ def cfg_set(clave, valor):
              "ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor", (clave, valor))
 
 
-def _abrir_spreadsheet():
+def _secret(clave, default=None):
+    try:
+        return st.secrets[clave]
+    except Exception:
+        return default
+
+
+def _sheets_url():
+    return _secret("gsheets_url") or cfg_get("gsheets_url")
+
+
+def _credenciales():
     scopes = ["https://www.googleapis.com/auth/spreadsheets",
               "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file(GCP_JSON, scopes=scopes)
-    gc = gspread.authorize(creds)
-    return gc.open_by_url(cfg_get("gsheets_url"))
+    info = _secret("gcp_service_account")
+    if info:
+        return Credentials.from_service_account_info(dict(info), scopes=scopes)
+    if os.path.exists(GCP_JSON):
+        return Credentials.from_service_account_file(GCP_JSON, scopes=scopes)
+    raise RuntimeError("No hay credenciales de Google configuradas.")
+
+
+def _abrir_spreadsheet():
+    gc = gspread.authorize(_credenciales())
+    return gc.open_by_url(_sheets_url())
 
 
 def sincronizar_a_sheets() -> int:
@@ -330,6 +349,8 @@ def traer_de_sheets() -> int:
         except Exception:
             continue
         registros = ws.get_all_records()
+        if not registros:
+            continue
         ejecutar(f"DELETE FROM {t}")
         for r in registros:
             cols = list(r.keys())
@@ -591,10 +612,21 @@ def pantalla_login():
                "que les asignó el Administrador.")
     modo = st.radio("Tipo de acceso", ["Administrador (acceso libre)", "Usuario con clave"])
     if modo.startswith("Administrador"):
-        if st.button("Entrar como Administrador"):
-            st.session_state.auth = {"nombre": "Administrador General",
-                                     "rol": "Administrador", "obra_id": None}
-            st.rerun()
+        admin_hash = cfg_get("admin_pass_hash")
+        if admin_hash:
+            pw = st.text_input("Clave del Administrador", type="password")
+            if st.button("Entrar como Administrador"):
+                if pw and _hash(pw) == admin_hash:
+                    st.session_state.auth = {"nombre": "Administrador General",
+                                             "rol": "Administrador", "obra_id": None}
+                    st.rerun()
+                else:
+                    st.error("Clave de Administrador incorrecta.")
+        else:
+            if st.button("Entrar como Administrador"):
+                st.session_state.auth = {"nombre": "Administrador General",
+                                         "rol": "Administrador", "obra_id": None}
+                st.rerun()
     else:
         usuarios = obtener_usuarios()
         if usuarios.empty:
@@ -1052,8 +1084,8 @@ def vista_sheets(rol: str):
                  "python -m pip install gspread google-auth")
         return
 
-    creds_ok = os.path.exists(GCP_JSON)
-    url_ok = bool(cfg_get("gsheets_url"))
+    creds_ok = os.path.exists(GCP_JSON) or bool(_secret("gcp_service_account"))
+    url_ok = bool(_sheets_url())
     c1, c2 = st.columns(2)
     c1.metric("Credenciales", "Cargadas ✅" if creds_ok else "Faltan ❌")
     c2.metric("Hoja vinculada", "Configurada ✅" if url_ok else "Falta ❌")
@@ -1155,6 +1187,25 @@ def vista_usuarios(rol: str):
             if st.form_submit_button("🔑 Cambiar clave") and nueva:
                 ejecutar("UPDATE usuarios SET clave_hash=? WHERE nombre=?", (_hash(nueva), u_sel))
                 st.success(f"Clave de «{u_sel}» actualizada."); st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### 🔒 Seguridad del Administrador (recomendado al publicar en internet)")
+    actual = cfg_get("admin_pass_hash")
+    st.caption("Estado: " + ("✅ El Administrador ya requiere clave."
+                             if actual else
+                             "⚠️ El Administrador entra libre (bien para uso local, "
+                             "riesgoso en internet)."))
+    with st.form("form_admin_pass"):
+        nueva_admin = st.text_input("Clave del Administrador (deja vacío y guarda para quitarla)",
+                                    type="password")
+        if st.form_submit_button("Guardar clave del Administrador"):
+            if nueva_admin.strip():
+                cfg_set("admin_pass_hash", _hash(nueva_admin.strip()))
+                st.success("Clave del Administrador establecida.")
+            else:
+                cfg_set("admin_pass_hash", "")
+                st.success("Clave del Administrador eliminada (acceso libre).")
+            st.rerun()
 
 
 def vista_proveedores(rol: str):
@@ -1870,10 +1921,27 @@ def main():
     usuario = auth["nombre"]
     obra_asignada = auth["obra_id"]
 
+    # En la nube: traer datos del Google Sheet una vez por sesión (si está configurado)
+    if GSHEETS_OK and _secret("auto_pull") and not st.session_state.get("_pulled"):
+        try:
+            traer_de_sheets()
+        except Exception:
+            pass
+        st.session_state["_pulled"] = True
+
     st.sidebar.markdown(f"<span class='chip'>{usuario} · {rol}</span>", unsafe_allow_html=True)
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.auth = None
         st.rerun()
+    _cloud_ok = GSHEETS_OK and _sheets_url() and (os.path.exists(GCP_JSON)
+                                                  or bool(_secret("gcp_service_account")))
+    if _cloud_ok and puede(rol, "editar"):
+        if st.sidebar.button("☁️ Guardar en la nube"):
+            try:
+                sincronizar_a_sheets()
+                st.sidebar.success("Datos guardados en Google Sheets.")
+            except Exception:
+                st.sidebar.error("No se pudo guardar en la nube.")
     st.sidebar.markdown("---")
 
     disponibles = obras_visibles(rol, obra_asignada)
