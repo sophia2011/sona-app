@@ -613,6 +613,34 @@ def verificar_clave_admin(clave_ingresada) -> bool:
     return bool(clave_ingresada) and _hash(clave_ingresada) == h
 
 
+def _candado_admin(clave_estado: str, etiqueta: str) -> bool:
+    """Botón de lápiz que pide la clave del Administrador.
+    Devuelve True solo cuando la edición está desbloqueada."""
+    if st.session_state.get(f"unlock_{clave_estado}"):
+        if st.button("🔒 Terminar edición", key=f"lock_{clave_estado}"):
+            st.session_state[f"unlock_{clave_estado}"] = False
+            st.rerun()
+        return True
+    if st.button(f"✏️ {etiqueta}", key=f"pencil_{clave_estado}"):
+        st.session_state[f"ask_{clave_estado}"] = True
+    if st.session_state.get(f"ask_{clave_estado}"):
+        st.caption("Ingresa la clave del Administrador para ver y modificar los datos.")
+        cl = st.text_input("Clave del Administrador", type="password",
+                           key=f"clave_{clave_estado}")
+        c1, c2 = st.columns(2)
+        if c1.button("Desbloquear", key=f"unlock_btn_{clave_estado}"):
+            if verificar_clave_admin(cl):
+                st.session_state[f"unlock_{clave_estado}"] = True
+                st.session_state[f"ask_{clave_estado}"] = False
+                st.rerun()
+            else:
+                st.error("Clave del Administrador incorrecta.")
+        if c2.button("Cancelar", key=f"cancel_{clave_estado}"):
+            st.session_state[f"ask_{clave_estado}"] = False
+            st.rerun()
+    return False
+
+
 def pantalla_login():
     """Pantalla de acceso. El Administrador entra libre; los demás con clave."""
     st.markdown("## 🔐 Acceso a Constructor PRO")
@@ -832,12 +860,12 @@ def vista_dashboard(obra_id: int):
     destajos = consultar("SELECT * FROM destajos WHERE obra_id=?", (obra_id,))
     compras = consultar("SELECT * FROM compras WHERE obra_id=?", (obra_id,))
     g1, g2 = st.columns([1, 2])
-    with g1: st.plotly_chart(grafica_gauge(k["avance"]), width="stretch")
-    with g2: st.plotly_chart(grafica_avance_etapas(etapas), width="stretch")
-    st.plotly_chart(grafica_gantt(etapas), width="stretch")
+    with g1: st.plotly_chart(grafica_gauge(k["avance"]), width="stretch", key="plt_1")
+    with g2: st.plotly_chart(grafica_avance_etapas(etapas), width="stretch", key="plt_2")
+    st.plotly_chart(grafica_gantt(etapas), width="stretch", key="plt_3")
     g3, g4 = st.columns(2)
-    with g3: st.plotly_chart(grafica_destajos(destajos), width="stretch")
-    with g4: st.plotly_chart(grafica_compras_categoria(compras), width="stretch")
+    with g3: st.plotly_chart(grafica_destajos(destajos), width="stretch", key="plt_4")
+    with g4: st.plotly_chart(grafica_compras_categoria(compras), width="stretch", key="plt_5")
 
 
 def comprobante_compra_html(compra_id: int) -> str:
@@ -913,7 +941,7 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
         c2.metric("Total comprado", f"{pesos(compras['importe'].sum())}")
         hoy_total = compras[compras["fecha"] == HOY.isoformat()]["importe"].sum()
         c3.metric("Comprado hoy", f"{pesos(hoy_total)}")
-        st.plotly_chart(grafica_compras_categoria(compras), width="stretch")
+        st.plotly_chart(grafica_compras_categoria(compras), width="stretch", key="plt_6")
 
     if puede(rol, "editar"):
         # Alta rápida de proveedor (fuera del formulario para refrescar el listado)
@@ -1214,43 +1242,6 @@ def vista_usuarios(rol: str):
             st.success(f"Usuario «{nombre}» creado con rol {rol_u}."); st.rerun()
 
     if not usuarios.empty:
-        st.markdown("---")
-        st.markdown("#### ✏️ Modificar un usuario")
-        st.caption("Para guardar cambios se solicita la clave del Administrador. "
-                   "(La contraseña de acceso del usuario se cambia en «Restablecer la clave».)")
-        um_sel = st.selectbox("Selecciona el usuario a modificar", usuarios["nombre"].tolist(),
-                              key="user_edit_sel")
-        u = usuarios[usuarios["nombre"] == um_sel].iloc[0]
-        with st.form("form_user_editar"):
-            col1, col2 = st.columns(2)
-            with col1:
-                e_codigo = st.text_input("Clave / código", value=u["codigo"] or "")
-                e_nombre = st.text_input("Nombre completo", value=u["nombre"] or "")
-                rol_idx = ROLES_ASIGNABLES.index(u["rol"]) if u["rol"] in ROLES_ASIGNABLES else 0
-                e_rol = st.selectbox("Rol", ROLES_ASIGNABLES, index=rol_idx)
-            with col2:
-                e_tel = st.text_input("Teléfono", value=u["telefono"] or "")
-                e_correo = st.text_input("Correo", value=u["correo"] or "")
-                obra_op2 = ["(Todas / sin asignar)"] + (obras["nombre"].tolist()
-                                                        if not obras.empty else [])
-                obra_actual = u["obra"] if pd.notna(u["obra"]) else "(Todas / sin asignar)"
-                obra_idx = obra_op2.index(obra_actual) if obra_actual in obra_op2 else 0
-                e_obra = st.selectbox("Obra asignada", obra_op2, index=obra_idx)
-            clave_adm = st.text_input("Clave del Administrador", type="password",
-                                      key="user_edit_clave")
-            if st.form_submit_button("💾 Guardar cambios del usuario") and e_nombre.strip():
-                if not verificar_clave_admin(clave_adm):
-                    st.error("Clave del Administrador incorrecta. No se guardaron los cambios.")
-                else:
-                    oid = (obra_id_por_nombre(e_obra)
-                           if e_obra != "(Todas / sin asignar)" else None)
-                    ejecutar("UPDATE usuarios SET codigo=?, nombre=?, rol=?, telefono=?, "
-                             "correo=?, obra_id=? WHERE id=?",
-                             (e_codigo.strip(), e_nombre.strip(), e_rol, e_tel, e_correo, oid,
-                              int(u["id"])))
-                    st.success(f"Usuario «{e_nombre}» actualizado."); st.rerun()
-
-    if not usuarios.empty:
         st.markdown("#### Restablecer la clave de un usuario")
         with st.form("form_reset_clave"):
             u_sel = st.selectbox("Usuario", usuarios["nombre"].tolist())
@@ -1319,6 +1310,59 @@ def vista_proveedores(rol: str):
             st.success(f"Proveedor «{nombre}» guardado."); st.rerun()
 
 
+@st.dialog("✏️ Modificar obra")
+def dlg_modificar_obra(obras, clientes):
+    ob_labels, ob_map = opciones_clave(obras)
+    ob_lbl = st.selectbox("Obra a modificar", ob_labels, key="dlg_ob_sel")
+    o = obras[obras["nombre"] == ob_map[ob_lbl]].iloc[0]
+    e_codigo = st.text_input("Clave de la obra", value=o["codigo"] or "")
+    e_nombre = st.text_input("Nombre de la obra", value=o["nombre"] or "")
+    cli_list = clientes["empresa"].tolist()
+    cli_idx = cli_list.index(o["cliente"]) if o["cliente"] in cli_list else 0
+    e_cliente = st.selectbox("Cliente", cli_list, index=cli_idx)
+    e_ubic = st.text_input("Ubicación", value=o["ubicacion"] or "")
+    e_ing = st.text_input("Responsable de obra", value=o["ingeniero"] or "")
+    e_pres = st.number_input("Presupuesto ($ MXN)", min_value=0.0, step=10000.0,
+                             value=float(o["presupuesto"] or 0))
+    est_op = ["En proceso", "Detenida", "Terminada"]
+    e_estatus = st.selectbox("Estatus", est_op,
+                             index=est_op.index(o["estatus"]) if o["estatus"] in est_op else 0)
+    c1, c2 = st.columns(2)
+    if c1.button("💾 Guardar cambios", key="dlg_ob_save") and e_nombre.strip():
+        cid = int(clientes[clientes["empresa"] == e_cliente]["id"].iloc[0])
+        ejecutar("UPDATE obras SET codigo=?, nombre=?, cliente_id=?, ubicacion=?, "
+                 "ingeniero=?, presupuesto=?, estatus=? WHERE id=?",
+                 (e_codigo.strip(), e_nombre.strip(), cid, e_ubic, e_ing, e_pres,
+                  e_estatus, int(o["id"])))
+        st.session_state["open_obra_dlg"] = False
+        st.rerun()
+    if c2.button("Cancelar", key="dlg_ob_cancel"):
+        st.session_state["open_obra_dlg"] = False
+        st.rerun()
+
+
+@st.dialog("✏️ Modificar contratista")
+def dlg_modificar_contratista(contr):
+    cm_labels, cm_map = opciones_clave(contr)
+    cm_lbl = st.selectbox("Contratista a modificar", cm_labels, key="dlg_co_sel")
+    cc = contr[contr["nombre"] == cm_map[cm_lbl]].iloc[0]
+    e_codigo = st.text_input("Clave del contratista", value=cc["codigo"] or "")
+    e_nombre = st.text_input("Nombre del contratista", value=cc["nombre"] or "")
+    e_esp = st.text_input("Especialidad", value=cc["especialidad"] or "")
+    e_tel = st.text_input("Teléfono", value=cc["telefono"] or "")
+    e_correo = st.text_input("Correo", value=cc["correo"] or "")
+    c1, c2 = st.columns(2)
+    if c1.button("💾 Guardar cambios", key="dlg_co_save") and e_nombre.strip():
+        ejecutar("UPDATE contratistas SET codigo=?, nombre=?, especialidad=?, telefono=?, "
+                 "correo=? WHERE id=?",
+                 (e_codigo.strip(), e_nombre.strip(), e_esp, e_tel, e_correo, int(cc["id"])))
+        st.session_state["open_contr_dlg"] = False
+        st.rerun()
+    if c2.button("Cancelar", key="dlg_co_cancel"):
+        st.session_state["open_contr_dlg"] = False
+        st.rerun()
+
+
 def vista_obras(rol: str):
     st.subheader("🏢 Obras · Alta y listado")
     obras = obtener_obras()
@@ -1373,43 +1417,29 @@ def vista_obras(rol: str):
                          (oid, et, i.isoformat(), f.isoformat(), "Por iniciar", 0))
             st.success(f"Obra «{nombre}» creada con sus etapas base."); st.rerun()
 
-    # ----- Modificar una obra existente (solo Administrador, con su clave) -----
+    # ----- Modificar una obra (botón -> clave -> ventana) -----
     if not obras.empty:
         st.markdown("---")
-        st.markdown("#### ✏️ Modificar una obra")
-        st.caption("Para guardar cambios se solicita la clave del Administrador.")
-        ob_labels, ob_map = opciones_clave(obras)
-        ob_lbl = st.selectbox("Selecciona la obra a modificar", ob_labels, key="ob_edit_sel")
-        o = obras[obras["nombre"] == ob_map[ob_lbl]].iloc[0]
-        with st.form("form_obra_editar"):
-            col1, col2 = st.columns(2)
-            with col1:
-                e_codigo = st.text_input("Clave de la obra", value=o["codigo"] or "")
-                e_nombre = st.text_input("Nombre de la obra", value=o["nombre"] or "")
-                cli_list = clientes["empresa"].tolist()
-                cli_idx = cli_list.index(o["cliente"]) if o["cliente"] in cli_list else 0
-                e_cliente = st.selectbox("Cliente", cli_list, index=cli_idx)
-                e_ubic = st.text_input("Ubicación", value=o["ubicacion"] or "")
-                e_ing = st.text_input("Responsable de obra", value=o["ingeniero"] or "")
-            with col2:
-                e_pres = st.number_input("Presupuesto ($ MXN)", min_value=0.0, step=10000.0,
-                                         value=float(o["presupuesto"] or 0))
-                e_estatus = st.selectbox("Estatus", ["En proceso", "Detenida", "Terminada"],
-                                         index=["En proceso", "Detenida", "Terminada"].index(
-                                             o["estatus"]) if o["estatus"] in
-                                         ["En proceso", "Detenida", "Terminada"] else 0)
-                clave_adm = st.text_input("Clave del Administrador", type="password",
-                                          key="ob_edit_clave")
-            if st.form_submit_button("💾 Guardar cambios de la obra") and e_nombre.strip():
-                if not verificar_clave_admin(clave_adm):
-                    st.error("Clave del Administrador incorrecta. No se guardaron los cambios.")
+        st.markdown("#### Modificar una obra")
+        st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
+        if st.button("✏️ Modificar una obra", key="btn_mod_obra"):
+            st.session_state["ask_obra"] = True
+            st.session_state["open_obra_dlg"] = False
+        if st.session_state.get("ask_obra") and not st.session_state.get("open_obra_dlg"):
+            cl = st.text_input("Clave del Administrador", type="password", key="cl_obra")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("Abrir ventana de edición", key="ok_obra"):
+                if verificar_clave_admin(cl):
+                    st.session_state["open_obra_dlg"] = True
+                    st.session_state["ask_obra"] = False
+                    st.rerun()
                 else:
-                    cid = int(clientes[clientes["empresa"] == e_cliente]["id"].iloc[0])
-                    ejecutar("UPDATE obras SET codigo=?, nombre=?, cliente_id=?, ubicacion=?, "
-                             "ingeniero=?, presupuesto=?, estatus=? WHERE id=?",
-                             (e_codigo.strip(), e_nombre.strip(), cid, e_ubic, e_ing, e_pres,
-                              e_estatus, int(o["id"])))
-                    st.success(f"Obra «{e_nombre}» actualizada."); st.rerun()
+                    st.error("Clave del Administrador incorrecta.")
+            if cc2.button("Cancelar", key="cancel_obra_ask"):
+                st.session_state["ask_obra"] = False
+                st.rerun()
+        if st.session_state.get("open_obra_dlg"):
+            dlg_modificar_obra(obras, clientes)
 
 
 def vista_contratistas(rol: str):
@@ -1475,35 +1505,29 @@ def vista_contratistas(rol: str):
                          (oid, c_map[contr_lbl], concepto.strip(), monto, anticipo, avance, "En proceso"))
                 st.success(f"«{c_map[contr_lbl]}» asignado a «{o_map[obra_lbl]}»."); st.rerun()
 
-    # ----- Modificar un contratista existente (solo Administrador, con su clave) -----
+    # ----- Modificar un contratista (botón -> clave -> ventana) -----
     if puede(rol, "admin") and not contr.empty:
         st.markdown("---")
-        st.markdown("#### ✏️ Modificar un contratista")
-        st.caption("Para guardar cambios se solicita la clave del Administrador.")
-        cm_labels, cm_map = opciones_clave(contr)
-        cm_lbl = st.selectbox("Selecciona el contratista a modificar", cm_labels,
-                              key="contr_edit_sel")
-        cc = contr[contr["nombre"] == cm_map[cm_lbl]].iloc[0]
-        with st.form("form_contr_editar"):
-            col1, col2 = st.columns(2)
-            with col1:
-                e_codigo = st.text_input("Clave del contratista", value=cc["codigo"] or "")
-                e_nombre = st.text_input("Nombre del contratista", value=cc["nombre"] or "")
-                e_esp = st.text_input("Especialidad", value=cc["especialidad"] or "")
-            with col2:
-                e_tel = st.text_input("Teléfono", value=cc["telefono"] or "")
-                e_correo = st.text_input("Correo", value=cc["correo"] or "")
-                clave_adm = st.text_input("Clave del Administrador", type="password",
-                                          key="contr_edit_clave")
-            if st.form_submit_button("💾 Guardar cambios del contratista") and e_nombre.strip():
-                if not verificar_clave_admin(clave_adm):
-                    st.error("Clave del Administrador incorrecta. No se guardaron los cambios.")
+        st.markdown("#### Modificar un contratista")
+        st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
+        if st.button("✏️ Modificar un contratista", key="btn_mod_contr"):
+            st.session_state["ask_contr"] = True
+            st.session_state["open_contr_dlg"] = False
+        if st.session_state.get("ask_contr") and not st.session_state.get("open_contr_dlg"):
+            cl = st.text_input("Clave del Administrador", type="password", key="cl_contr")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("Abrir ventana de edición", key="ok_contr"):
+                if verificar_clave_admin(cl):
+                    st.session_state["open_contr_dlg"] = True
+                    st.session_state["ask_contr"] = False
+                    st.rerun()
                 else:
-                    ejecutar("UPDATE contratistas SET codigo=?, nombre=?, especialidad=?, "
-                             "telefono=?, correo=? WHERE id=?",
-                             (e_codigo.strip(), e_nombre.strip(), e_esp, e_tel, e_correo,
-                              int(cc["id"])))
-                    st.success(f"Contratista «{e_nombre}» actualizado."); st.rerun()
+                    st.error("Clave del Administrador incorrecta.")
+            if cc2.button("Cancelar", key="cancel_contr_ask"):
+                st.session_state["ask_contr"] = False
+                st.rerun()
+        if st.session_state.get("open_contr_dlg"):
+            dlg_modificar_contratista(contr)
 
 
 def vista_presupuesto(obra_id: int, rol: str):
@@ -1518,7 +1542,7 @@ def vista_presupuesto(obra_id: int, rol: str):
     c2.metric("Presupuesto de la obra", f"{pesos(k['presupuesto'])}")
     c3.metric("Ejercido (compras)", f"{pesos(k['ejercido'])}", f"{k['pct']}%")
     if not pres.empty:
-        st.plotly_chart(grafica_presupuesto_partidas(pres), width="stretch")
+        st.plotly_chart(grafica_presupuesto_partidas(pres), width="stretch", key="plt_7")
         comp = pd.DataFrame({"Concepto": ["Presupuesto cargado", "Ejercido"],
                              "Monto": [total_cargado, k["ejercido"]]})
         comp["_etq"] = comp["Monto"].map(pesos)
@@ -1526,7 +1550,7 @@ def vista_presupuesto(obra_id: int, rol: str):
                      color_discrete_sequence=[COLOR_PRIMARIO, COLOR_ACENTO],
                      title="Presupuesto cargado vs Ejercido")
         fig.update_traces(textposition="outside")
-        st.plotly_chart(_mate(fig, 340), width="stretch")
+        st.plotly_chart(_mate(fig, 340), width="stretch", key="plt_8")
         tabla = pres[["partida", "concepto", "monto"]].copy()
         tabla["monto"] = tabla["monto"].map(lambda x: f"{pesos(x)}")
         st.dataframe(tabla.rename(columns={"partida": "Partida", "concepto": "Concepto",
@@ -1696,7 +1720,7 @@ def vista_destajos(obra_id: int, rol: str):
         c1.metric("Contratado", f"{pesos(dest['monto_contratado'].sum())}")
         c2.metric("Pagado", f"{pesos(dest['pagado'].sum())}")
         c3.metric("Saldo por pagar", f"{pesos(dest['saldo'].sum())}")
-        st.plotly_chart(grafica_destajos(dest), width="stretch")
+        st.plotly_chart(grafica_destajos(dest), width="stretch", key="plt_9")
         tabla = dest[["contratista", "concepto", "monto_contratado", "pagado", "saldo",
                       "avance", "estatus"]].copy()
         for col in ["monto_contratado", "pagado", "saldo"]:
