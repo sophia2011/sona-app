@@ -2124,18 +2124,14 @@ def main():
                          else "Pide al Administrador que te asigne una."))
     obra_id = obra_id_por_nombre(obra_nombre)
 
-    secciones = ["Dashboard", "Proveedores", "Contratistas", "Compras",
-                 "Presupuesto", "Requisiciones", "Destajos", "Avances y Bitácora",
-                 "Editar / Borrar", "Reportes"]
+    # Menú según el rol: el Administrador ve todo; los demás (residentes), solo lo permitido
     if puede(rol, "admin"):
-        secciones.insert(1, "Obras")
-    if puede(rol, "crm"):
-        secciones.insert(1, "CRM")
-    if puede(rol, "usuarios"):
-        secciones.insert(1, "Usuarios")
-    if puede(rol, "admin"):
-        secciones.append("Respaldo")
-        secciones.append("Google Sheets")
+        secciones = ["Dashboard", "Usuarios", "CRM", "Obras", "Proveedores", "Contratistas",
+                     "Compras", "Presupuesto", "Requisiciones", "Destajos", "Avances y Bitácora",
+                     "Editar / Borrar", "Reportes", "Respaldo", "Google Sheets"]
+    else:
+        secciones = ["Proveedores", "Contratistas", "Presupuesto", "Requisiciones",
+                     "Destajos", "Avances y Bitácora", "Reportes"]
     st.sidebar.markdown("---")
     seccion = st.sidebar.radio("📂 Navegación", secciones)
 
