@@ -76,6 +76,11 @@ def pesos(valor) -> str:
     return f"{signo}$ {izq}.{der}"
 
 
+def mayus(s):
+    """Devuelve el texto en MAYÚSCULAS (deja igual lo que no sea texto)."""
+    return s.strip().upper() if isinstance(s, str) else s
+
+
 # =============================================================================
 # 0) TEMA CLARO AUTOMÁTICO
 # =============================================================================
@@ -155,6 +160,9 @@ def inyectar_estilos() -> None:
         .chip { display:inline-block; background:#EDE8DF; color:#5A5650 !important;
                 border-radius:999px; padding:4px 12px; font-size:.78rem; font-weight:600; }
         #MainMenu {visibility:hidden;} footer {visibility:hidden;}
+        /* La captura de texto se muestra en MAYÚSCULAS por defecto */
+        input[type="text"], textarea { text-transform: uppercase; }
+        input[type="password"] { text-transform: none; }
     </style>""", unsafe_allow_html=True)
 
 
@@ -877,7 +885,7 @@ def pdf_requisicion(req_id: int) -> bytes:
                       ("No. de cuenta", _g("cuenta")),
                       ("CLABE interbancaria", _g("clabe")),
                       ("Tarjeta", _g("tarjeta")),
-                      ("Correo (comprobante de pago)", _g("correo")),
+                      ("Correo", _g("correo")),
                       ("Agente de ventas", _g("agente")),
                       ("Telefono", _g("telefono"))])
     pdf.ln(2)
@@ -1391,8 +1399,8 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
             ejecutar("INSERT INTO compras(obra_id,fecha,categoria,descripcion,importe,"
                      "proveedor,comprador,comprobante,factura,metodo_pago,hora) "
                      "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                     (obra_id, fecha.isoformat(), categoria, descripcion.strip(), importe,
-                      proveedor, comprador.strip(), nom_comp, nom_fact, metodo_pago,
+                     (obra_id, fecha.isoformat(), categoria, mayus(descripcion), importe,
+                      proveedor, mayus(comprador), nom_comp, nom_fact, metodo_pago,
                       ahora_mx().strftime("%H:%M")))
             st.success("Compra registrada y cargada a la obra.")
             st.rerun()
@@ -1506,7 +1514,7 @@ def vista_crm(rol: str):
             notas = st.text_input("Notas")
         if st.form_submit_button("➕ Guardar cliente") and empresa.strip():
             ejecutar("INSERT INTO clientes(empresa,contacto,telefono,correo,tipo,notas) "
-                     "VALUES(?,?,?,?,?,?)", (empresa.strip(), contacto, telefono, correo, tipo, notas))
+                     "VALUES(?,?,?,?,?,?)", (mayus(empresa), mayus(contacto), telefono.strip(), correo.strip(), tipo, mayus(notas)))
             st.success(f"Cliente «{empresa}» guardado."); st.rerun()
 
     if not clientes.empty:
@@ -1531,8 +1539,8 @@ def vista_crm(rol: str):
             if st.form_submit_button("💾 Guardar cambios") and e_empresa.strip():
                 ejecutar("UPDATE clientes SET empresa=?, contacto=?, telefono=?, correo=?, "
                          "tipo=?, notas=? WHERE id=?",
-                         (e_empresa.strip(), e_contacto, e_telefono, e_correo, e_tipo,
-                          e_notas, int(c["id"])))
+                         (mayus(e_empresa), mayus(e_contacto), e_telefono.strip(), e_correo.strip(), e_tipo,
+                          mayus(e_notas), int(c["id"])))
                 st.success(f"Datos de «{e_empresa}» actualizados."); st.rerun()
 
 
@@ -1647,7 +1655,8 @@ def dlg_modificar_usuario(usuarios, obras):
         oid = obra_id_por_nombre(e_obra) if e_obra != "(Todas / sin asignar)" else None
         ejecutar("UPDATE usuarios SET codigo=?, nombre=?, rol=?, telefono=?, correo=?, "
                  "obra_id=? WHERE id=?",
-                 (e_codigo.strip(), e_nombre.strip(), e_rol, e_tel, e_correo, oid, int(u["id"])))
+                 (mayus(e_codigo), mayus(e_nombre), e_rol, e_tel.strip(), e_correo.strip(),
+                  oid, int(u["id"])))
         st.session_state["open_user_dlg"] = False
         st.rerun()
     if c2.button("Cancelar", key="dlg_us_cancel"):
@@ -1696,7 +1705,7 @@ def vista_usuarios(rol: str):
             oid = obra_id_por_nombre(obra_sel) if obra_sel != "(Todas / sin asignar)" else None
             ejecutar("INSERT INTO usuarios(codigo,nombre,rol,telefono,correo,obra_id,clave_hash,activo) "
                      "VALUES(?,?,?,?,?,?,?,1)",
-                     (codigo.strip(), nombre.strip(), rol_u, telefono, correo, oid, _hash(clave)))
+                     (mayus(codigo), mayus(nombre), rol_u, telefono.strip(), correo.strip(), oid, _hash(clave)))
             st.success(f"Usuario «{nombre}» creado con rol {rol_u}."); st.rerun()
 
     if not usuarios.empty:
@@ -1799,9 +1808,54 @@ def vista_proveedores(rol: str):
         if st.form_submit_button("➕ Guardar proveedor") and nombre.strip():
             ejecutar("INSERT INTO proveedores(codigo,nombre,agente,telefono,correo,cuenta,clabe,"
                      "tarjeta,banco,beneficiario) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                     (codigo.strip(), nombre.strip(), agente, telefono, correo, cuenta, clabe,
-                      tarjeta, banco, beneficiario))
-            st.success(f"Proveedor «{nombre}» guardado."); st.rerun()
+                     (mayus(codigo), mayus(nombre), mayus(agente), telefono.strip(),
+                      correo.strip(), cuenta.strip(), clabe.strip(), tarjeta.strip(),
+                      mayus(banco), mayus(beneficiario)))
+            st.success(f"Proveedor «{mayus(nombre)}» guardado."); st.rerun()
+
+    if not prov.empty:
+        st.markdown("---")
+        st.markdown("#### ✏️ Modificar un proveedor")
+        st.caption("Cualquier usuario con acceso puede corregir los datos del proveedor.")
+        if st.button("✏️ Modificar un proveedor", key="btn_mod_prov"):
+            st.session_state["open_prov_dlg"] = True
+        if st.session_state.get("open_prov_dlg"):
+            dlg_modificar_proveedor(prov)
+
+
+@st.dialog("✏️ Modificar proveedor")
+def dlg_modificar_proveedor(prov):
+    labels, mapa = opciones_clave(prov)
+    lbl = st.selectbox("Proveedor a modificar", labels, key="dlg_pr_sel")
+    p = prov[prov["nombre"] == mapa[lbl]].iloc[0]
+
+    def g(c):
+        return p[c] if c in prov.columns and p[c] else ""
+    col1, col2 = st.columns(2)
+    with col1:
+        e_codigo = st.text_input("Clave del proveedor", value=g("codigo"))
+        e_nombre = st.text_input("Proveedor (empresa)", value=g("nombre"))
+        e_agente = st.text_input("Agente de ventas", value=g("agente"))
+        e_tel = st.text_input("Teléfono", value=g("telefono"))
+        e_correo = st.text_input("Correo", value=g("correo"))
+    with col2:
+        e_cuenta = st.text_input("Número de cuenta", value=g("cuenta"))
+        e_clabe = st.text_input("CLABE interbancaria", value=g("clabe"))
+        e_tarjeta = st.text_input("Tarjeta", value=g("tarjeta"))
+        e_banco = st.text_input("Banco", value=g("banco"))
+        e_benef = st.text_input("Beneficiario de la cuenta", value=g("beneficiario"))
+    c1, c2 = st.columns(2)
+    if c1.button("💾 Guardar cambios", key="dlg_pr_save") and e_nombre.strip():
+        ejecutar("UPDATE proveedores SET codigo=?, nombre=?, agente=?, telefono=?, correo=?, "
+                 "cuenta=?, clabe=?, tarjeta=?, banco=?, beneficiario=? WHERE id=?",
+                 (mayus(e_codigo), mayus(e_nombre), mayus(e_agente), e_tel.strip(),
+                  e_correo.strip(), e_cuenta.strip(), e_clabe.strip(), e_tarjeta.strip(),
+                  mayus(e_banco), mayus(e_benef), int(p["id"])))
+        st.session_state["open_prov_dlg"] = False
+        st.rerun()
+    if c2.button("Cancelar", key="dlg_pr_cancel"):
+        st.session_state["open_prov_dlg"] = False
+        st.rerun()
 
 
 @st.dialog("✏️ Modificar obra")
@@ -1826,7 +1880,7 @@ def dlg_modificar_obra(obras, clientes):
         cid = int(clientes[clientes["empresa"] == e_cliente]["id"].iloc[0])
         ejecutar("UPDATE obras SET codigo=?, nombre=?, cliente_id=?, ubicacion=?, "
                  "ingeniero=?, presupuesto=?, estatus=? WHERE id=?",
-                 (e_codigo.strip(), e_nombre.strip(), cid, e_ubic, e_ing, e_pres,
+                 (mayus(e_codigo), mayus(e_nombre), cid, mayus(e_ubic), mayus(e_ing), e_pres,
                   e_estatus, int(o["id"])))
         st.session_state["open_obra_dlg"] = False
         st.rerun()
@@ -1852,8 +1906,8 @@ def dlg_modificar_contratista(contr):
     if c1.button("💾 Guardar cambios", key="dlg_co_save") and e_nombre.strip():
         ejecutar("UPDATE contratistas SET codigo=?, nombre=?, especialidad=?, telefono=?, "
                  "correo=?, monto_contratado=? WHERE id=?",
-                 (e_codigo.strip(), e_nombre.strip(), e_esp, e_tel, e_correo, e_monto,
-                  int(cc["id"])))
+                 (mayus(e_codigo), mayus(e_nombre), mayus(e_esp), e_tel.strip(),
+                  e_correo.strip(), e_monto, int(cc["id"])))
         st.session_state["open_contr_dlg"] = False
         st.rerun()
     if c2.button("Cancelar", key="dlg_co_cancel"):
@@ -1940,7 +1994,7 @@ def vista_obras(rol: str):
             cid = int(clientes[clientes["empresa"] == cliente_sel]["id"].iloc[0])
             ejecutar("INSERT INTO obras(codigo,nombre,cliente_id,ubicacion,ingeniero,presupuesto,"
                      "fecha_inicio,fecha_fin,estatus) VALUES(?,?,?,?,?,?,?,?,?)",
-                     (codigo.strip(), nombre.strip(), cid, ubicacion, ingeniero, presupuesto,
+                     (mayus(codigo), mayus(nombre), cid, mayus(ubicacion), mayus(ingeniero), presupuesto,
                       inicio.isoformat(), fin.isoformat(), estatus))
             oid = obra_id_por_nombre(nombre.strip())
             for et, i, f in [("Cimentación", inicio, inicio + timedelta(days=20)),
@@ -2028,7 +2082,7 @@ def vista_contratistas(rol: str):
         if st.form_submit_button("➕ Registrar contratista") and nombre.strip():
             ejecutar("INSERT INTO contratistas(codigo,nombre,especialidad,telefono,correo,"
                      "monto_contratado) VALUES(?,?,?,?,?,?)",
-                     (codigo.strip(), nombre.strip(), especialidad, telefono, correo, monto_contr))
+                     (mayus(codigo), mayus(nombre), mayus(especialidad), telefono.strip(), correo.strip(), monto_contr))
             st.success(f"Contratista «{nombre}» registrado."); st.rerun()
     st.markdown("#### 2) Asignar un contratista a una obra")
     if contr.empty or obras.empty:
@@ -2050,7 +2104,7 @@ def vista_contratistas(rol: str):
                 oid = obra_id_por_nombre(o_map[obra_lbl])
                 ejecutar("INSERT INTO destajos(obra_id,contratista,concepto,monto_contratado,"
                          "pagado,avance,estatus) VALUES(?,?,?,?,?,?,?)",
-                         (oid, c_map[contr_lbl], concepto.strip(), monto, anticipo, avance, "En proceso"))
+                         (oid, c_map[contr_lbl], mayus(concepto), monto, anticipo, avance, "En proceso"))
                 st.success(f"«{c_map[contr_lbl]}» asignado a «{o_map[obra_lbl]}»."); st.rerun()
 
     # ----- Contrato aprobado (PDF) del contratista -----
@@ -2223,7 +2277,7 @@ def vista_control_financiero(obra_id: int, rol: str):
         if st.form_submit_button("💾 Registrar abono") and concepto.strip() and monto > 0:
             ejecutar("INSERT INTO abonos(obra_id,fecha,concepto,monto,metodo_pago,nota) "
                      "VALUES(?,?,?,?,?,?)",
-                     (obra_id, fecha.isoformat(), concepto.strip(), monto, metodo, nota.strip()))
+                     (obra_id, fecha.isoformat(), mayus(concepto), monto, metodo, mayus(nota)))
             st.success(f"Abono de {pesos(monto)} registrado."); st.rerun()
     if not abonos.empty:
         st.markdown("#### 🗑️ Eliminar un abono")
@@ -2279,8 +2333,8 @@ def vista_requisiciones(obra_id: int, rol: str, usuario: str):
             ejecutar("INSERT INTO requisiciones(obra_id,folio,fecha,solicitante,material,cantidad,"
                      "unidad,proveedor,costo_estimado,estatus,prioridad) "
                      "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                     (obra_id, folio, HOY.isoformat(), usuario, material.strip(), cantidad,
-                      unidad, proveedor, costo, "Solicitada", prioridad))
+                     (obra_id, mayus(folio), HOY.isoformat(), usuario, mayus(material), cantidad,
+                      mayus(unidad), proveedor, costo, "Solicitada", prioridad))
             st.success("Requisición registrada."); st.rerun()
     if not reqs.empty:
         st.markdown("#### Actualizar estatus / prioridad de una requisición")
@@ -2389,7 +2443,7 @@ def vista_destajos(obra_id: int, rol: str):
         if st.form_submit_button("➕ Registrar destajo") and (contratista or "").strip():
             ejecutar("INSERT INTO destajos(obra_id,contratista,concepto,monto_contratado,pagado,"
                      "avance,estatus) VALUES(?,?,?,?,?,?,?)",
-                     (obra_id, contratista.strip(), concepto, monto, pagado, avance, estatus))
+                     (obra_id, mayus(contratista), mayus(concepto), monto, pagado, avance, estatus))
             st.success("Destajo registrado."); st.rerun()
     if not dest.empty:
         st.markdown("#### Registrar un pago a destajo")
@@ -2408,8 +2462,8 @@ def vista_destajos(obra_id: int, rol: str):
                                    (obra_id, contr_sel))["pagado"].iloc[0]
                 ejecutar("UPDATE destajos SET pagado=?, metodo_pago=?, datos_bancarios=?, "
                          "banco_beneficiario=? WHERE obra_id=? AND contratista=?",
-                         (float(actual) + abono, metodo_d, datos_banc.strip(),
-                          banco_benef.strip(), obra_id, contr_sel))
+                         (float(actual) + abono, metodo_d, mayus(datos_banc),
+                          mayus(banco_benef), obra_id, contr_sel))
                 st.success(f"Pago de {pesos(abono)} aplicado a {contr_sel}."); st.rerun()
 
 
