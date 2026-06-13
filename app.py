@@ -855,7 +855,7 @@ ROLES_ASIGNABLES = ["Departamento de Control", "Ingeniero de Obra", "Supervisor"
 
 PERMISOS = {
     "Administrador":           {"ver": True, "editar": True,  "crm": True,  "admin": True,  "usuarios": True,  "todas_obras": True},
-    "Departamento de Control": {"ver": True, "editar": True,  "crm": True,  "admin": False, "usuarios": False, "todas_obras": False},
+    "Departamento de Control": {"ver": True, "editar": True,  "crm": True,  "admin": False, "usuarios": False, "todas_obras": True},
     "Ingeniero de Obra":       {"ver": True, "editar": True,  "crm": False, "admin": False, "usuarios": False, "todas_obras": False},
     "Supervisor":              {"ver": True, "editar": True,  "crm": False, "admin": False, "usuarios": False, "todas_obras": False},
     "Cliente":                 {"ver": True, "editar": False, "crm": False, "admin": False, "usuarios": False, "todas_obras": False},
@@ -952,6 +952,29 @@ def obras_visibles(rol: str, obra_asignada) -> list:
     if obra_asignada:
         return obras[obras["id"] == obra_asignada]["nombre"].tolist()
     return []
+
+
+def selector_obra_trabajo(obra_id_actual, rol, etiqueta, key):
+    """Para usuarios con acceso a todas las obras: muestra un menú desplegable de obra
+    dentro de la sección y devuelve el obra_id elegido. Para los demás, deja la obra activa."""
+    if not puede(rol, "todas_obras"):
+        return obra_id_actual
+    obras = obtener_obras()
+    if obras.empty:
+        return obra_id_actual
+    labels, mapa = opciones_clave(obras)
+    ids = [obra_id_por_nombre(mapa[l]) for l in labels]
+    prev = st.session_state.get("obra_trabajo_id", obra_id_actual)
+    if prev in ids:
+        idx = ids.index(prev)
+    elif obra_id_actual in ids:
+        idx = ids.index(obra_id_actual)
+    else:
+        idx = 0
+    sel = st.selectbox(etiqueta, labels, index=idx, key=key)
+    elegido = obra_id_por_nombre(mapa[sel])
+    st.session_state["obra_trabajo_id"] = elegido
+    return elegido
 
 
 def requiere_obra(obra_id: int) -> bool:
@@ -1203,8 +1226,11 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
     st.subheader("🛒 Compras y gastos diarios")
     if not requiere_obra(obra_id):
         return
+    if puede(rol, "todas_obras"):
+        obra_id = selector_obra_trabajo(obra_id, rol,
+                                        "🏢 Obra a la que se cargará la compra", "compras_obra_sel")
     obra_nombre = consultar("SELECT nombre FROM obras WHERE id=?", (obra_id,))["nombre"].iloc[0]
-    st.caption(f"Las compras se cargarán a la obra activa: **{obra_nombre}**")
+    st.caption(f"Las compras se cargarán a la obra: **{obra_nombre}**")
 
     proveedores = obtener_proveedores()
     prov_labels, prov_map = opciones_clave(proveedores) if not proveedores.empty else ([], {})
@@ -1621,6 +1647,12 @@ def vista_usuarios(rol: str):
 
 def vista_proveedores(rol: str):
     st.subheader("🏭 Proveedores")
+    if puede(rol, "todas_obras"):
+        obra_prev = st.session_state.get("obra_trabajo_id")
+        selector_obra_trabajo(obra_prev, rol, "🏢 Obra de trabajo (para cargar compras)",
+                              "prov_obra_sel")
+        st.caption("Los proveedores son compartidos entre todas las obras. Esta selección define "
+                   "la obra a la que se cargarán las compras en la sección «Compras».")
     prov = obtener_proveedores()
     st.metric("Proveedores registrados", len(prov))
     if prov.empty:
@@ -2639,6 +2671,10 @@ def main():
                      "Compras", "Presupuesto", "Control Financiero", "Requisiciones", "Destajos",
                      "Avances y Bitácora", "Editar / Borrar", "Reportes", "Respaldo",
                      "Google Sheets"]
+    elif rol == "Departamento de Control":
+        secciones = ["Dashboard", "Proveedores", "Contratistas", "Compras", "Presupuesto",
+                     "Control Financiero", "Requisiciones", "Destajos", "Avances y Bitácora",
+                     "Reportes"]
     else:
         secciones = ["Proveedores", "Contratistas", "Presupuesto", "Requisiciones",
                      "Destajos", "Avances y Bitácora", "Reportes"]
