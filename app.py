@@ -454,6 +454,13 @@ def obtener_contrato(obra_id):
     return df.iloc[0] if not df.empty else None
 
 
+def _adjunto_existe(nombre_archivo) -> bool:
+    """True si el adjunto realmente existe en disco (no solo un nombre guardado)."""
+    if not isinstance(nombre_archivo, str) or not nombre_archivo.strip():
+        return False
+    return os.path.exists(os.path.join(COMPROB_DIR, nombre_archivo))
+
+
 def guardar_contrato_contr(contratista_id, archivo):
     """Guarda el contrato (PDF) de un contratista dentro de la base de datos, en base64."""
     import base64
@@ -989,8 +996,8 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
     prov_labels, prov_map = opciones_clave(proveedores) if not proveedores.empty else ([], {})
     usuarios_df = obtener_usuarios()
     if not usuarios_df.empty:
-        asign = usuarios_df[(usuarios_df["obra_id"] == obra_id) | (usuarios_df["obra_id"].isna())]
-        compradores = asign["nombre"].tolist() or usuarios_df["nombre"].tolist()
+        asign = usuarios_df[usuarios_df["obra_id"] == obra_id]
+        compradores = asign["nombre"].tolist()
     else:
         compradores = []
     compras = consultar("SELECT * FROM compras WHERE obra_id=? ORDER BY fecha DESC, id DESC",
@@ -1078,12 +1085,19 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                  width="stretch", hide_index=True)
 
     st.markdown("#### Comprobante PDF, adjuntos y factura por compra")
-    st.caption("Descarga el comprobante de la compra para imprimirlo o guardarlo en PDF, "
-               "y los archivos adjuntos:")
-    for _, c in compras.iterrows():
+    con_adjuntos = compras[compras.apply(
+        lambda c: _adjunto_existe(c["comprobante"]) or _adjunto_existe(c["factura"]), axis=1)]
+    if con_adjuntos.empty:
+        st.caption("Aún no hay compras con comprobante o factura adjunta.")
+        return
+    st.caption("Solo se muestran las compras que tienen comprobante o factura subidos:")
+    for _, c in con_adjuntos.iterrows():
         st.write(f"**{c['fecha']}** · {c['categoria']} · {c['descripcion']} ({pesos(c['importe'])})")
-        cols = st.columns(3)
-        with cols[0]:
+        tiene_comp = _adjunto_existe(c["comprobante"])
+        tiene_fact = _adjunto_existe(c["factura"])
+        cols = st.columns(1 + int(tiene_comp) + int(tiene_fact))
+        i = 0
+        with cols[i]:
             if FPDF_OK:
                 st.download_button("⬇️ Comprobante PDF", data=pdf_compra(int(c["id"])),
                                    file_name=f"Compra_{int(c['id'])}.pdf",
@@ -1093,10 +1107,14 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                                    data=comprobante_compra_html(int(c["id"])),
                                    file_name=f"Compra_{int(c['id'])}.html",
                                    mime="text/html", key=f"pdf_{c['id']}")
-        with cols[1]:
-            boton_descarga_adjunto(c["comprobante"], "📎 Adjunto", f"comp_{c['id']}")
-        with cols[2]:
-            boton_descarga_adjunto(c["factura"], "🧾 Factura", f"fact_{c['id']}")
+        if tiene_comp:
+            i += 1
+            with cols[i]:
+                boton_descarga_adjunto(c["comprobante"], "📎 Adjunto", f"comp_{c['id']}")
+        if tiene_fact:
+            i += 1
+            with cols[i]:
+                boton_descarga_adjunto(c["factura"], "🧾 Factura", f"fact_{c['id']}")
         st.markdown("<hr style='margin:4px 0;border:none;border-top:1px solid #E6E2DA;'>",
                     unsafe_allow_html=True)
 
