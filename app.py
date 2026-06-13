@@ -115,6 +115,7 @@ COLOR_ALERTA = "#B4554C"
 CATEGORIAS_COMPRA = ["Materiales", "Herramienta y/o equipo", "Gasolina", "Comidas",
                      "Traslados", "Hospedaje", "Viáticos"]
 ESTATUS_REQ = ["Solicitada", "Aprobada", "Comprada", "Entregada"]
+PRIORIDAD_REQ = ["Normal", "Urgente", "En espera"]
 TIPO_CLIENTE = ["Prospecto", "Activo", "Cerrado"]
 METODOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta de débito", "Tarjeta de crédito"]
 
@@ -268,6 +269,15 @@ def crear_tablas() -> None:
         pass
     try:
         conn.execute("ALTER TABLE compras ADD COLUMN hora TEXT")
+    except Exception:
+        pass
+    for col in ["banco", "beneficiario"]:
+        try:
+            conn.execute(f"ALTER TABLE proveedores ADD COLUMN {col} TEXT")
+        except Exception:
+            pass
+    try:
+        conn.execute("ALTER TABLE requisiciones ADD COLUMN prioridad TEXT DEFAULT 'Normal'")
     except Exception:
         pass
     for col in ["metodo_pago", "datos_bancarios", "banco_beneficiario"]:
@@ -845,13 +855,31 @@ def pdf_requisicion(req_id: int) -> bytes:
     obra = consultar("SELECT nombre,ubicacion FROM obras WHERE id=?", (int(r["obra_id"]),))
     on = obra["nombre"].iloc[0] if not obra.empty else ""
     ou = obra["ubicacion"].iloc[0] if not obra.empty else ""
+    prioridad = r["prioridad"] if "prioridad" in r.index and r["prioridad"] else "Normal"
     pdf = _pdf_base(f"Requisicion de Material  -  {r['folio']}")
     _pdf_kv(pdf, [("Obra", f"{on} - {ou}"), ("Folio", r["folio"]), ("Fecha", r["fecha"]),
                   ("Solicitante", r["solicitante"] or ""), ("Material", r["material"]),
                   ("Cantidad", f"{r['cantidad']} {r['unidad']}"),
-                  ("Proveedor", r["proveedor"] or ""), ("Estatus", r["estatus"])])
+                  ("Proveedor", r["proveedor"] or ""),
+                  ("Estatus", r["estatus"]), ("Prioridad", prioridad)])
     _pdf_parrafo(pdf, f"Costo estimado: {pesos(r['costo_estimado'])} MXN", size=15, bold=True,
                  color=PDF_PRIMARY)
+    # Datos del proveedor para el pago
+    prov = consultar("SELECT * FROM proveedores WHERE nombre=?", (r["proveedor"],))
+    if not prov.empty:
+        p = prov.iloc[0]
+
+        def _g(col):
+            return p[col] if col in prov.columns and p[col] else ""
+        _pdf_titulo(pdf, "Datos del proveedor para el pago")
+        _pdf_kv(pdf, [("Beneficiario de la cuenta", _g("beneficiario") or _g("nombre")),
+                      ("Banco", _g("banco")),
+                      ("No. de cuenta", _g("cuenta")),
+                      ("CLABE interbancaria", _g("clabe")),
+                      ("Tarjeta", _g("tarjeta")),
+                      ("Correo (comprobante de pago)", _g("correo")),
+                      ("Agente de ventas", _g("agente")),
+                      ("Telefono", _g("telefono"))])
     pdf.ln(2)
     _pdf_parrafo(pdf, f"Generado por {EMPRESA} - {HOY.isoformat()}",
                  size=9, color=(122, 118, 110))
@@ -1746,6 +1774,10 @@ def vista_proveedores(rol: str):
                 st.write(f"**Cuenta:** {p['cuenta'] or '—'}")
                 st.write(f"**CLABE:** {p['clabe'] or '—'}")
                 st.write(f"**Tarjeta:** {p['tarjeta'] or '—'}")
+                banco_v = p["banco"] if "banco" in prov.columns and p["banco"] else "—"
+                benef_v = p["beneficiario"] if "beneficiario" in prov.columns and p["beneficiario"] else "—"
+                st.write(f"**Banco:** {banco_v}")
+                st.write(f"**Beneficiario:** {benef_v}")
     if not puede(rol, "editar"):
         st.info("Solo Administrador o Ingeniero pueden registrar proveedores."); return
     st.markdown("---")
@@ -1762,10 +1794,13 @@ def vista_proveedores(rol: str):
             cuenta = st.text_input("Número de cuenta")
             clabe = st.text_input("CLABE interbancaria")
             tarjeta = st.text_input("Tarjeta")
+            banco = st.text_input("Banco")
+            beneficiario = st.text_input("Beneficiario de la cuenta")
         if st.form_submit_button("➕ Guardar proveedor") and nombre.strip():
-            ejecutar("INSERT INTO proveedores(codigo,nombre,agente,telefono,correo,cuenta,clabe,tarjeta) "
-                     "VALUES(?,?,?,?,?,?,?,?)",
-                     (codigo.strip(), nombre.strip(), agente, telefono, correo, cuenta, clabe, tarjeta))
+            ejecutar("INSERT INTO proveedores(codigo,nombre,agente,telefono,correo,cuenta,clabe,"
+                     "tarjeta,banco,beneficiario) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     (codigo.strip(), nombre.strip(), agente, telefono, correo, cuenta, clabe,
+                      tarjeta, banco, beneficiario))
             st.success(f"Proveedor «{nombre}» guardado."); st.rerun()
 
 
@@ -2239,21 +2274,27 @@ def vista_requisiciones(obra_id: int, rol: str, usuario: str):
             else:
                 proveedor = st.text_input("Proveedor (regístralo en «Proveedores»)")
             costo = st.number_input("Costo estimado ($ MXN)", min_value=0.0, step=100.0, format="%.2f")
+            prioridad = st.selectbox("Prioridad", PRIORIDAD_REQ)
         if st.form_submit_button("➕ Registrar requisición") and material.strip():
             ejecutar("INSERT INTO requisiciones(obra_id,folio,fecha,solicitante,material,cantidad,"
-                     "unidad,proveedor,costo_estimado,estatus) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     "unidad,proveedor,costo_estimado,estatus,prioridad) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                      (obra_id, folio, HOY.isoformat(), usuario, material.strip(), cantidad,
-                      unidad, proveedor, costo, "Solicitada"))
+                      unidad, proveedor, costo, "Solicitada", prioridad))
             st.success("Requisición registrada."); st.rerun()
     if not reqs.empty:
-        st.markdown("#### Actualizar estatus de una requisición")
+        st.markdown("#### Actualizar estatus / prioridad de una requisición")
         with st.form("form_req_estatus"):
             folio_sel = st.selectbox("Folio", reqs["folio"].tolist())
-            nuevo = st.selectbox("Nuevo estatus", ESTATUS_REQ)
+            cse1, cse2 = st.columns(2)
+            with cse1:
+                nuevo = st.selectbox("Nuevo estatus", ESTATUS_REQ)
+            with cse2:
+                nueva_prio = st.selectbox("Prioridad", PRIORIDAD_REQ)
             if st.form_submit_button("💾 Actualizar"):
-                ejecutar("UPDATE requisiciones SET estatus=? WHERE obra_id=? AND folio=?",
-                         (nuevo, obra_id, folio_sel))
-                st.success(f"Requisición {folio_sel} → {nuevo}."); st.rerun()
+                ejecutar("UPDATE requisiciones SET estatus=?, prioridad=? WHERE obra_id=? AND folio=?",
+                         (nuevo, nueva_prio, obra_id, folio_sel))
+                st.success(f"Requisición {folio_sel} → {nuevo} · {nueva_prio}."); st.rerun()
 
         st.markdown("#### 📤 Enviar requisición (PDF / WhatsApp / correo)")
         folio_wa = st.selectbox("Requisición a enviar", reqs["folio"].tolist(), key="wa_folio")
