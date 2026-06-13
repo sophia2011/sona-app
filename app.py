@@ -2108,12 +2108,30 @@ def vista_contratistas(rol: str):
                 monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
                 anticipo = st.number_input("Anticipo / pagado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
                 avance = st.slider("% Avance", 0, 100, 0)
-            if st.form_submit_button("🔗 Asignar a la obra") and concepto.strip():
-                oid = obra_id_por_nombre(o_map[obra_lbl])
+            clave_dup = st.text_input("Clave del Administrador (solo si repites un contratista en la "
+                                      "misma obra para otra partida)", type="password",
+                                      key="asig_dup_clave")
+            asignar = st.form_submit_button("🔗 Asignar a la obra")
+        if asignar and concepto.strip():
+            oid = obra_id_por_nombre(o_map[obra_lbl])
+            nom = c_map[contr_lbl]
+            prev = consultar("SELECT concepto FROM destajos WHERE obra_id=? AND contratista=?",
+                             (oid, nom))
+            permitido = True
+            if not prev.empty:
+                if not verificar_clave_admin(clave_dup):
+                    st.error(f"«{nom}» ya está asignado a esta obra. Para asignarle otra partida "
+                             f"se requiere la clave del Administrador.")
+                    permitido = False
+                elif mayus(concepto) in [str(x).upper() for x in prev["concepto"].tolist()]:
+                    st.error("Ya existe ese mismo concepto para este contratista en la obra. "
+                             "Usa una partida/concepto diferente.")
+                    permitido = False
+            if permitido:
                 ejecutar("INSERT INTO destajos(obra_id,contratista,concepto,monto_contratado,"
                          "pagado,avance,estatus) VALUES(?,?,?,?,?,?,?)",
-                         (oid, c_map[contr_lbl], mayus(concepto), monto, anticipo, avance, "En proceso"))
-                st.success(f"«{c_map[contr_lbl]}» asignado a «{o_map[obra_lbl]}»."); st.rerun()
+                         (oid, nom, mayus(concepto), monto, anticipo, avance, "En proceso"))
+                st.success(f"«{nom}» asignado a «{o_map[obra_lbl]}»."); st.rerun()
 
     # ----- Contrato aprobado (PDF) del contratista -----
     if not contr.empty:
@@ -2452,15 +2470,36 @@ def vista_destajos(obra_id: int, rol: str):
             monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
             pagado = st.number_input("Pagado a la fecha ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
             avance = st.slider("% Avance", 0, 100, 0)
-        if st.form_submit_button("➕ Registrar destajo") and (contratista or "").strip():
+        clave_dup = st.text_input("Clave del Administrador (solo si repites un contratista en esta "
+                                  "obra para otra partida)", type="password", key="dest_dup_clave")
+        reg = st.form_submit_button("➕ Registrar destajo")
+    if reg and (contratista or "").strip():
+        nom = mayus(contratista)
+        prev = consultar("SELECT concepto FROM destajos WHERE obra_id=? AND contratista=?",
+                         (obra_id, nom))
+        permitido = True
+        if not prev.empty:
+            if not verificar_clave_admin(clave_dup):
+                st.error(f"«{nom}» ya está asignado a esta obra. Para registrarlo otra vez (otra "
+                         f"partida) se requiere la clave del Administrador.")
+                permitido = False
+            elif mayus(concepto) in [str(x).upper() for x in prev["concepto"].tolist()]:
+                st.error("Ya existe un destajo con ese mismo concepto para este contratista. "
+                         "Usa una partida/concepto diferente.")
+                permitido = False
+        if permitido:
             ejecutar("INSERT INTO destajos(obra_id,contratista,concepto,monto_contratado,pagado,"
                      "avance,estatus) VALUES(?,?,?,?,?,?,?)",
-                     (obra_id, mayus(contratista), mayus(concepto), monto, pagado, avance, estatus))
+                     (obra_id, nom, mayus(concepto), monto, pagado, avance, estatus))
             st.success("Destajo registrado."); st.rerun()
     if not dest.empty:
         st.markdown("#### Registrar un pago a destajo")
         with st.form("form_dest_pago"):
-            contr_sel = st.selectbox("Contratista", dest["contratista"].tolist())
+            opc = [(f"{i+1}. {r['contratista']} · {r['concepto']}", int(r["id"]))
+                   for i, (_, r) in enumerate(dest.iterrows())]
+            etiquetas = [e for e, _ in opc]
+            sel = st.selectbox("Destajo a pagar (contratista · concepto)", etiquetas)
+            did = dict(opc)[sel]
             col1, col2 = st.columns(2)
             with col1:
                 abono = st.number_input("Monto del pago ($ MXN)", min_value=0.0, step=1000.0,
@@ -2470,13 +2509,12 @@ def vista_destajos(obra_id: int, rol: str):
                 datos_banc = st.text_input("No. tarjeta / CLABE interbancaria / No. cuenta")
                 banco_benef = st.text_input("Banco y nombre del beneficiario")
             if st.form_submit_button("💾 Aplicar pago"):
-                actual = consultar("SELECT pagado FROM destajos WHERE obra_id=? AND contratista=?",
-                                   (obra_id, contr_sel))["pagado"].iloc[0]
+                actual = consultar("SELECT pagado FROM destajos WHERE id=?", (did,))["pagado"].iloc[0]
                 ejecutar("UPDATE destajos SET pagado=?, metodo_pago=?, datos_bancarios=?, "
-                         "banco_beneficiario=? WHERE obra_id=? AND contratista=?",
+                         "banco_beneficiario=? WHERE id=?",
                          (float(actual) + abono, metodo_d, mayus(datos_banc),
-                          mayus(banco_benef), obra_id, contr_sel))
-                st.success(f"Pago de {pesos(abono)} aplicado a {contr_sel}."); st.rerun()
+                          mayus(banco_benef), did))
+                st.success(f"Pago de {pesos(abono)} aplicado."); st.rerun()
 
 
 def vista_avances(obra_id: int, rol: str, usuario: str):
