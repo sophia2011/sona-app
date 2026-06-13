@@ -223,6 +223,9 @@ def crear_tablas() -> None:
         CREATE TABLE IF NOT EXISTS contratos(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             obra_id INTEGER, nombre TEXT, contenido TEXT, fecha TEXT);
+        CREATE TABLE IF NOT EXISTS contratos_contr(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contratista_id INTEGER, nombre TEXT, contenido TEXT, fecha TEXT);
     """)
     # Migración: agrega la columna 'codigo' (clave de identificación) si falta
     for tabla in ["obras", "contratistas", "proveedores", "usuarios"]:
@@ -232,6 +235,14 @@ def crear_tablas() -> None:
             pass
     try:
         conn.execute("ALTER TABLE obras ADD COLUMN contrato_link TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE contratistas ADD COLUMN monto_contratado REAL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE contratistas ADD COLUMN contrato_link TEXT")
     except Exception:
         pass
     conn.commit()
@@ -441,6 +452,34 @@ def guardar_contrato(obra_id, archivo):
 def obtener_contrato(obra_id):
     df = consultar("SELECT nombre,contenido,fecha FROM contratos WHERE obra_id=?", (obra_id,))
     return df.iloc[0] if not df.empty else None
+
+
+def guardar_contrato_contr(contratista_id, archivo):
+    """Guarda el contrato (PDF) de un contratista dentro de la base de datos, en base64."""
+    import base64
+    contenido = base64.b64encode(archivo.getbuffer()).decode("ascii")
+    ejecutar("DELETE FROM contratos_contr WHERE contratista_id=?", (contratista_id,))
+    ejecutar("INSERT INTO contratos_contr(contratista_id,nombre,contenido,fecha) VALUES(?,?,?,?)",
+             (contratista_id, archivo.name, contenido, HOY.isoformat()))
+
+
+def obtener_contrato_contr(contratista_id):
+    df = consultar("SELECT nombre,contenido,fecha FROM contratos_contr WHERE contratista_id=?",
+                   (contratista_id,))
+    return df.iloc[0] if not df.empty else None
+
+
+def control_contratista(nombre):
+    """Compara el monto contratado del contratista contra sus destajos."""
+    cap_df = consultar("SELECT monto_contratado FROM contratistas WHERE nombre=?", (nombre,))
+    cap = float(cap_df["monto_contratado"].iloc[0] or 0) if not cap_df.empty else 0.0
+    d = consultar("SELECT COALESCE(SUM(monto_contratado),0) a, COALESCE(SUM(pagado),0) p "
+                  "FROM destajos WHERE contratista=?", (nombre,))
+    asignado = float(d["a"].iloc[0] or 0)
+    pagado = float(d["p"].iloc[0] or 0)
+    excedido = cap > 0 and (asignado > cap or pagado > cap)
+    return {"cap": cap, "asignado": asignado, "pagado": pagado,
+            "disponible": cap - asignado, "excedido": excedido}
 
 
 # =============================================================================
@@ -1372,11 +1411,15 @@ def dlg_modificar_contratista(contr):
     e_esp = st.text_input("Especialidad", value=cc["especialidad"] or "")
     e_tel = st.text_input("Teléfono", value=cc["telefono"] or "")
     e_correo = st.text_input("Correo", value=cc["correo"] or "")
+    e_monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0,
+                              value=float(cc["monto_contratado"] or 0),
+                              help="Tope para el control de destajos de este contratista.")
     c1, c2 = st.columns(2)
     if c1.button("💾 Guardar cambios", key="dlg_co_save") and e_nombre.strip():
         ejecutar("UPDATE contratistas SET codigo=?, nombre=?, especialidad=?, telefono=?, "
-                 "correo=? WHERE id=?",
-                 (e_codigo.strip(), e_nombre.strip(), e_esp, e_tel, e_correo, int(cc["id"])))
+                 "correo=?, monto_contratado=? WHERE id=?",
+                 (e_codigo.strip(), e_nombre.strip(), e_esp, e_tel, e_correo, e_monto,
+                  int(cc["id"])))
         st.session_state["open_contr_dlg"] = False
         st.rerun()
     if c2.button("Cancelar", key="dlg_co_cancel"):
@@ -1514,6 +1557,17 @@ def vista_contratistas(rol: str):
                               "FROM destajos d JOIN obras o ON d.obra_id=o.id "
                               "WHERE d.contratista=?", (c["nombre"],))
             with st.expander(enc):
+                ctrl = control_contratista(c["nombre"])
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Monto contratado", pesos(ctrl["cap"]))
+                m2.metric("Asignado en destajos", pesos(ctrl["asignado"]))
+                m3.metric("Pagado", pesos(ctrl["pagado"]))
+                if ctrl["excedido"]:
+                    st.error("⚠️ CONTRATO EXCEDIDO")
+                elif ctrl["cap"] > 0:
+                    st.caption(f"Disponible por asignar: {pesos(ctrl['disponible'])}")
+                else:
+                    st.caption("Sin monto contratado definido (sin control de tope).")
                 if asign.empty:
                     st.caption("Sin obras asignadas todavía.")
                 else:
@@ -1534,10 +1588,12 @@ def vista_contratistas(rol: str):
             especialidad = st.text_input("Especialidad (ej. Albañilería)")
         with col2:
             telefono = st.text_input("Teléfono"); correo = st.text_input("Correo")
+            monto_contr = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0,
+                                          help="Tope para el control de destajos de este contratista.")
         if st.form_submit_button("➕ Registrar contratista") and nombre.strip():
-            ejecutar("INSERT INTO contratistas(codigo,nombre,especialidad,telefono,correo) "
-                     "VALUES(?,?,?,?,?)", (codigo.strip(), nombre.strip(), especialidad,
-                                           telefono, correo))
+            ejecutar("INSERT INTO contratistas(codigo,nombre,especialidad,telefono,correo,"
+                     "monto_contratado) VALUES(?,?,?,?,?,?)",
+                     (codigo.strip(), nombre.strip(), especialidad, telefono, correo, monto_contr))
             st.success(f"Contratista «{nombre}» registrado."); st.rerun()
     st.markdown("#### 2) Asignar un contratista a una obra")
     if contr.empty or obras.empty:
@@ -1561,6 +1617,41 @@ def vista_contratistas(rol: str):
                          "pagado,avance,estatus) VALUES(?,?,?,?,?,?,?)",
                          (oid, c_map[contr_lbl], concepto.strip(), monto, anticipo, avance, "En proceso"))
                 st.success(f"«{c_map[contr_lbl]}» asignado a «{o_map[obra_lbl]}»."); st.rerun()
+
+    # ----- Contrato aprobado (PDF) del contratista -----
+    if not contr.empty:
+        st.markdown("---")
+        st.markdown("#### 📄 Contrato aprobado del contratista (PDF)")
+        cc_labels, cc_map = opciones_clave(contr)
+        cc_lbl = st.selectbox("Selecciona el contratista", cc_labels, key="contrato_contr_sel")
+        cc_row = contr[contr["nombre"] == cc_map[cc_lbl]].iloc[0]
+        cc_id = int(cc_row["id"])
+        actual_c = obtener_contrato_contr(cc_id)
+        if actual_c is not None:
+            import base64
+            st.success(f"Contrato cargado: {actual_c['nombre']}  ·  subido el {actual_c['fecha']}")
+            st.download_button("📄 Descargar contrato del contratista",
+                               data=base64.b64decode(actual_c["contenido"]),
+                               file_name=actual_c["nombre"], mime="application/pdf",
+                               key="dl_contrato_contr")
+        else:
+            st.caption("Este contratista aún no tiene contrato aprobado cargado.")
+        pdf_cc = st.file_uploader("Cargar / reemplazar contrato aprobado (PDF)",
+                                  type=["pdf"], key="up_contrato_contr")
+        if pdf_cc is not None and st.button("💾 Guardar contrato", key="save_contrato_contr"):
+            guardar_contrato_contr(cc_id, pdf_cc)
+            st.success("Contrato aprobado guardado."); st.rerun()
+        link_cc = cc_row["contrato_link"] if "contrato_link" in contr.columns else None
+        st.caption("Opción recomendada para internet: pega un link del contrato "
+                   "(Google Drive, Dropbox, etc.). El link no se borra al reiniciarse el servidor.")
+        nuevo_link_cc = st.text_input("Link del contrato (opcional)", value=link_cc or "",
+                                      key="contrato_contr_link_in")
+        if st.button("💾 Guardar link del contrato", key="save_link_contr"):
+            ejecutar("UPDATE contratistas SET contrato_link=? WHERE id=?",
+                     (nuevo_link_cc.strip(), cc_id))
+            st.success("Link del contrato guardado."); st.rerun()
+        if link_cc:
+            st.markdown(f"🔗 [Abrir contrato en el navegador]({link_cc})")
 
     # ----- Modificar un contratista (botón -> clave -> ventana) -----
     if puede(rol, "admin") and not contr.empty:
@@ -1785,6 +1876,24 @@ def vista_destajos(obra_id: int, rol: str):
         st.dataframe(tabla.rename(columns={"contratista": "Contratista", "concepto": "Concepto",
                      "monto_contratado": "Contratado", "pagado": "Pagado", "saldo": "Saldo",
                      "avance": "% Avance", "estatus": "Estatus"}), width="stretch", hide_index=True)
+
+        # Control del monto contratado por contratista (tope global)
+        st.markdown("#### 🔒 Control de monto contratado")
+        filas, excedidos = [], []
+        for nom in dest["contratista"].unique():
+            ct = control_contratista(nom)
+            estado = ("⚠️ CONTRATO EXCEDIDO" if ct["excedido"]
+                      else ("Dentro del contrato" if ct["cap"] > 0 else "Sin tope definido"))
+            filas.append({"Contratista": nom, "Monto contratado": pesos(ct["cap"]),
+                          "Asignado en destajos": pesos(ct["asignado"]),
+                          "Pagado": pesos(ct["pagado"]), "Estado": estado})
+            if ct["excedido"]:
+                excedidos.append((nom, ct))
+        st.dataframe(pd.DataFrame(filas), width="stretch", hide_index=True)
+        for nom, ct in excedidos:
+            st.error(f"⚠️ CONTRATO EXCEDIDO — {nom}: el monto contratado es "
+                     f"{pesos(ct['cap'])} y ya lleva {pesos(max(ct['asignado'], ct['pagado']))}.")
+
         st.markdown("#### 📄 Reporte semanal de pagos")
         st.caption("Suma de todos los destajos por pagar de esta obra, con datos de la empresa y logo.")
         if FPDF_OK:
