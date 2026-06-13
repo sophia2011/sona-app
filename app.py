@@ -121,6 +121,8 @@ CATEGORIAS_COMPRA = ["Materiales", "Herramienta y/o equipo", "Gasolina", "Comida
                      "Traslados", "Hospedaje", "Viáticos"]
 ESTATUS_REQ = ["Solicitada", "Aprobada", "Comprada", "Entregada"]
 PRIORIDAD_REQ = ["Normal", "Urgente", "En espera"]
+METODOS_PAGO_REQ = ["Efectivo", "Transferencia", "Depósito", "Tarjeta de débito",
+                    "Tarjeta de crédito"]
 TIPO_CLIENTE = ["Prospecto", "Activo", "Cerrado"]
 METODOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta de débito", "Tarjeta de crédito"]
 
@@ -286,6 +288,10 @@ def crear_tablas() -> None:
             pass
     try:
         conn.execute("ALTER TABLE requisiciones ADD COLUMN prioridad TEXT DEFAULT 'Normal'")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE requisiciones ADD COLUMN metodo_pago TEXT")
     except Exception:
         pass
     for col in ["metodo_pago", "datos_bancarios", "banco_beneficiario"]:
@@ -864,12 +870,14 @@ def pdf_requisicion(req_id: int) -> bytes:
     on = obra["nombre"].iloc[0] if not obra.empty else ""
     ou = obra["ubicacion"].iloc[0] if not obra.empty else ""
     prioridad = r["prioridad"] if "prioridad" in r.index and r["prioridad"] else "Normal"
+    metodo = r["metodo_pago"] if "metodo_pago" in r.index and r["metodo_pago"] else "—"
     pdf = _pdf_base(f"Requisicion de Material  -  {r['folio']}")
     _pdf_kv(pdf, [("Obra", f"{on} - {ou}"), ("Folio", r["folio"]), ("Fecha", r["fecha"]),
                   ("Solicitante", r["solicitante"] or ""), ("Material", r["material"]),
                   ("Cantidad", f"{r['cantidad']} {r['unidad']}"),
                   ("Proveedor", r["proveedor"] or ""),
-                  ("Estatus", r["estatus"]), ("Prioridad", prioridad)])
+                  ("Estatus", r["estatus"]), ("Prioridad", prioridad),
+                  ("Metodo de pago", metodo)])
     _pdf_parrafo(pdf, f"Costo estimado: {pesos(r['costo_estimado'])} MXN", size=15, bold=True,
                  color=PDF_PRIMARY)
     # Datos del proveedor para el pago
@@ -2329,25 +2337,29 @@ def vista_requisiciones(obra_id: int, rol: str, usuario: str):
                 proveedor = st.text_input("Proveedor (regístralo en «Proveedores»)")
             costo = st.number_input("Costo estimado ($ MXN)", min_value=0.0, step=100.0, format="%.2f")
             prioridad = st.selectbox("Prioridad", PRIORIDAD_REQ)
+            metodo_req = st.selectbox("Método de pago", METODOS_PAGO_REQ)
         if st.form_submit_button("➕ Registrar requisición") and material.strip():
             ejecutar("INSERT INTO requisiciones(obra_id,folio,fecha,solicitante,material,cantidad,"
-                     "unidad,proveedor,costo_estimado,estatus,prioridad) "
-                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     "unidad,proveedor,costo_estimado,estatus,prioridad,metodo_pago) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                      (obra_id, mayus(folio), HOY.isoformat(), usuario, mayus(material), cantidad,
-                      mayus(unidad), proveedor, costo, "Solicitada", prioridad))
+                      mayus(unidad), proveedor, costo, "Solicitada", prioridad, metodo_req))
             st.success("Requisición registrada."); st.rerun()
     if not reqs.empty:
         st.markdown("#### Actualizar estatus / prioridad de una requisición")
         with st.form("form_req_estatus"):
             folio_sel = st.selectbox("Folio", reqs["folio"].tolist())
-            cse1, cse2 = st.columns(2)
+            cse1, cse2, cse3 = st.columns(3)
             with cse1:
                 nuevo = st.selectbox("Nuevo estatus", ESTATUS_REQ)
             with cse2:
                 nueva_prio = st.selectbox("Prioridad", PRIORIDAD_REQ)
+            with cse3:
+                nuevo_metodo = st.selectbox("Método de pago", METODOS_PAGO_REQ)
             if st.form_submit_button("💾 Actualizar"):
-                ejecutar("UPDATE requisiciones SET estatus=?, prioridad=? WHERE obra_id=? AND folio=?",
-                         (nuevo, nueva_prio, obra_id, folio_sel))
+                ejecutar("UPDATE requisiciones SET estatus=?, prioridad=?, metodo_pago=? "
+                         "WHERE obra_id=? AND folio=?",
+                         (nuevo, nueva_prio, nuevo_metodo, obra_id, folio_sel))
                 st.success(f"Requisición {folio_sel} → {nuevo} · {nueva_prio}."); st.rerun()
 
         st.markdown("#### 📤 Enviar requisición (PDF / WhatsApp / correo)")
