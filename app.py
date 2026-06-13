@@ -2255,39 +2255,23 @@ def vista_requisiciones(obra_id: int, rol: str, usuario: str):
                          (nuevo, obra_id, folio_sel))
                 st.success(f"Requisición {folio_sel} → {nuevo}."); st.rerun()
 
-        st.markdown("#### 📲 Enviar requisición (PDF / WhatsApp)")
+        st.markdown("#### 📤 Enviar requisición (PDF / WhatsApp / correo)")
         folio_wa = st.selectbox("Requisición a enviar", reqs["folio"].tolist(), key="wa_folio")
         row = reqs[reqs["folio"] == folio_wa].iloc[0]
         rid = int(row["id"])
-
-        colp, colw = st.columns(2)
-        with colp:
-            if FPDF_OK:
-                st.download_button("⬇️ Descargar PDF", data=pdf_requisicion(rid),
-                                   file_name=f"{folio_wa}.pdf", mime="application/pdf",
-                                   key="reqpdf")
-            else:
-                st.caption("Para PDF de un clic instala: python -m pip install fpdf2")
-        with colw:
-            numero = st.text_input("WhatsApp (lada + número, solo dígitos)",
-                                   value="52", key="wa_num")
-        num_limpio = "".join(ch for ch in numero if ch.isdigit())
-        mensaje = (f"Requisición {row['folio']} - Obra: {obra_nombre}\n"
-                   f"Material: {row['material']} ({row['cantidad']} {row['unidad']})\n"
-                   f"Proveedor: {row['proveedor'] or 'N/D'}\n"
-                   f"Costo estimado: {pesos(row['costo_estimado'])}\n"
-                   f"Estatus: {row['estatus']}")
-        url = "https://wa.me/" + num_limpio + "?text=" + urllib.parse.quote(mensaje)
-        if len(num_limpio) >= 10:
-            try:
-                st.link_button("📲 Abrir WhatsApp con el mensaje", url)
-            except Exception:
-                st.markdown(f"[📲 Abrir WhatsApp con el mensaje]({url})")
+        if FPDF_OK:
+            st.download_button("⬇️ Descargar PDF", data=pdf_requisicion(rid),
+                               file_name=f"{folio_wa}.pdf", mime="application/pdf", key="reqpdf")
+            resumen = (f"Requisición {row['folio']} - Obra: "
+                       f"{consultar('SELECT nombre FROM obras WHERE id=?', (obra_id,))['nombre'].iloc[0]}\n"
+                       f"Material: {row['material']} ({row['cantidad']} {row['unidad']})\n"
+                       f"Proveedor: {row['proveedor'] or 'N/D'}\n"
+                       f"Costo estimado: {pesos(row['costo_estimado'])}\n"
+                       f"Estatus: {row['estatus']}")
+            bloque_enviar_reporte(pdf_requisicion(rid), f"Requisicion {row['folio']}",
+                                  f"{folio_wa}.pdf", resumen, "req")
         else:
-            st.caption("Escribe un número válido (lada + 10 dígitos) para habilitar el envío.")
-        st.caption("Se abrirá WhatsApp con el texto de la requisición listo hacia ese número. "
-                   "Adjunta el PDF descargado con un toque (WhatsApp no permite adjuntar "
-                   "archivos automáticamente desde un enlace).")
+            st.caption("Para el PDF instala una vez: python -m pip install fpdf2")
 
 
 def vista_destajos(obra_id: int, rol: str):
