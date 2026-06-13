@@ -111,6 +111,7 @@ CATEGORIAS_COMPRA = ["Materiales", "Herramienta y/o equipo", "Comidas",
                      "Traslados", "Hospedaje", "Viáticos"]
 ESTATUS_REQ = ["Solicitada", "Aprobada", "Comprada", "Entregada"]
 TIPO_CLIENTE = ["Prospecto", "Activo", "Cerrado"]
+METODOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta de débito", "Tarjeta de crédito"]
 
 
 # =============================================================================
@@ -245,6 +246,15 @@ def crear_tablas() -> None:
         conn.execute("ALTER TABLE contratistas ADD COLUMN contrato_link TEXT")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE compras ADD COLUMN metodo_pago TEXT")
+    except Exception:
+        pass
+    for col in ["metodo_pago", "datos_bancarios", "banco_beneficiario"]:
+        try:
+            conn.execute(f"ALTER TABLE destajos ADD COLUMN {col} TEXT")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -590,7 +600,9 @@ def pdf_compra(compra_id: int) -> bytes:
     pdf = _pdf_base("Comprobante de Compra")
     _pdf_kv(pdf, [("Obra", f"{on} - {ou}"), ("Fecha", c["fecha"]),
                   ("Categoria", c["categoria"]), ("Descripcion", c["descripcion"]),
-                  ("Proveedor", c["proveedor"] or ""), ("Quien compra", c["comprador"] or "")])
+                  ("Proveedor", c["proveedor"] or ""), ("Quien compra", c["comprador"] or ""),
+                  ("Metodo de pago", c["metodo_pago"] if "metodo_pago" in c.index
+                   and c["metodo_pago"] else "")])
     _pdf_parrafo(pdf, f"Importe: {pesos(c['importe'])} MXN", size=15, bold=True,
                  color=(47, 111, 106))
     if not prov.empty:
@@ -883,24 +895,32 @@ def pdf_pagos_semana(obra_id: int) -> bytes:
     cod = ""
     if not o.empty and "codigo" in o.columns and pd.notna(o["codigo"].iloc[0]):
         cod = str(o["codigo"].iloc[0])
-    dest = consultar("SELECT contratista,concepto,monto_contratado,pagado FROM destajos "
-                     "WHERE obra_id=?", (obra_id,))
+    dest = consultar("SELECT contratista,concepto,monto_contratado,pagado,metodo_pago,"
+                     "datos_bancarios,banco_beneficiario FROM destajos WHERE obra_id=?", (obra_id,))
     lunes = HOY - timedelta(days=HOY.weekday())
     domingo = lunes + timedelta(days=6)
     pdf = _pdf_base("Reporte semanal de pagos a destajos")
     _pdf_kv(pdf, [("Obra", f"{cod + ' - ' if cod else ''}{on}"),
                   ("Semana", f"{lunes.isoformat()} al {domingo.isoformat()}")])
-    filas, total = [], 0.0
+
+    def _t(v):
+        return str(v) if (pd.notna(v) and str(v).strip()) else "-"
+
+    _pdf_titulo(pdf, "Destajos a pagar esta semana")
+    hay, total = False, 0.0
     for _, r in dest.iterrows():
         saldo = float(r["monto_contratado"]) - float(r["pagado"])
         if saldo <= 0.009:
             continue
-        filas.append([r["contratista"], r["concepto"], f"{pesos(saldo)}"])
+        hay = True
         total += saldo
-    _pdf_titulo(pdf, "Destajos a pagar esta semana")
-    if filas:
-        _pdf_tabla(pdf, ["Contratista", "Concepto", "A pagar"], filas, [70, 75, 45])
-    else:
+        _pdf_parrafo(pdf, f"{r['contratista']}  -  {r['concepto']}", size=11, bold=True)
+        _pdf_kv(pdf, [("Metodo de pago", _t(r["metodo_pago"])),
+                      ("No. tarjeta / CLABE / cuenta", _t(r["datos_bancarios"])),
+                      ("Banco y beneficiario", _t(r["banco_beneficiario"])),
+                      ("A pagar", f"{pesos(saldo)} MXN")])
+        pdf.ln(1)
+    if not hay:
         _pdf_parrafo(pdf, "No hay saldos pendientes de pago.")
     _pdf_parrafo(pdf, f"TOTAL A PAGAR: {pesos(total)} MXN", size=15, bold=True,
                  color=(47, 111, 106))
@@ -1046,11 +1066,12 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                 else:
                     proveedor = st.text_input("Proveedor (regístralo arriba o en «Proveedores»)")
             with col3:
-                importe = st.number_input("Importe ($ MXN)", min_value=0.0, step=10.0)
+                importe = st.number_input("Importe ($ MXN)", min_value=0.0, step=10.0, format="%.2f")
                 if compradores:
                     comprador = st.selectbox("Quién realiza la compra", compradores)
                 else:
                     comprador = st.text_input("Quién realiza la compra", value=usuario)
+                metodo_pago = st.selectbox("Método de pago", METODOS_PAGO)
             colA, colB = st.columns(2)
             with colA:
                 comprobante = st.file_uploader("Comprobante (foto o PDF)",
@@ -1063,9 +1084,10 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
             nom_comp = guardar_adjunto(comprobante, "comp")
             nom_fact = guardar_adjunto(factura, "fact")
             ejecutar("INSERT INTO compras(obra_id,fecha,categoria,descripcion,importe,"
-                     "proveedor,comprador,comprobante,factura) VALUES(?,?,?,?,?,?,?,?,?)",
+                     "proveedor,comprador,comprobante,factura,metodo_pago) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?)",
                      (obra_id, fecha.isoformat(), categoria, descripcion.strip(), importe,
-                      proveedor, comprador.strip(), nom_comp, nom_fact))
+                      proveedor, comprador.strip(), nom_comp, nom_fact, metodo_pago))
             st.success("Compra registrada y cargada a la obra.")
             st.rerun()
         elif enviar:
@@ -1077,11 +1099,15 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
     if compras.empty:
         st.caption("Aún no hay compras registradas para esta obra.")
         return
-    tabla = compras[["fecha", "categoria", "descripcion", "proveedor", "comprador", "importe"]].copy()
+    cols_hist = ["fecha", "categoria", "descripcion", "proveedor", "comprador", "metodo_pago",
+                 "importe"]
+    cols_hist = [c for c in cols_hist if c in compras.columns]
+    tabla = compras[cols_hist].copy()
     tabla["importe"] = tabla["importe"].map(lambda x: f"{pesos(x)}")
     st.dataframe(tabla.rename(columns={"fecha": "Fecha", "categoria": "Categoría",
                  "descripcion": "Descripción", "proveedor": "Proveedor",
-                 "comprador": "Comprador", "importe": "Importe"}),
+                 "comprador": "Comprador", "metodo_pago": "Método de pago",
+                 "importe": "Importe"}),
                  width="stretch", hide_index=True)
 
     st.markdown("#### Comprobante PDF, adjuntos y factura por compra")
@@ -1275,6 +1301,34 @@ def vista_sheets(rol: str):
                "(reemplaza los datos locales).")
 
 
+@st.dialog("✏️ Modificar usuario")
+def dlg_modificar_usuario(usuarios, obras):
+    um_sel = st.selectbox("Usuario a modificar", usuarios["nombre"].tolist(), key="dlg_us_sel")
+    u = usuarios[usuarios["nombre"] == um_sel].iloc[0]
+    e_codigo = st.text_input("Clave / código", value=u["codigo"] or "")
+    e_nombre = st.text_input("Nombre completo", value=u["nombre"] or "")
+    rol_idx = ROLES_ASIGNABLES.index(u["rol"]) if u["rol"] in ROLES_ASIGNABLES else 0
+    e_rol = st.selectbox("Rol", ROLES_ASIGNABLES, index=rol_idx)
+    e_tel = st.text_input("Teléfono", value=u["telefono"] or "")
+    e_correo = st.text_input("Correo", value=u["correo"] or "")
+    obra_op2 = ["(Todas / sin asignar)"] + (obras["nombre"].tolist() if not obras.empty else [])
+    obra_actual = u["obra"] if pd.notna(u["obra"]) else "(Todas / sin asignar)"
+    obra_idx = obra_op2.index(obra_actual) if obra_actual in obra_op2 else 0
+    e_obra = st.selectbox("Obra asignada", obra_op2, index=obra_idx)
+    st.caption("La contraseña de acceso se cambia en «Restablecer la clave».")
+    c1, c2 = st.columns(2)
+    if c1.button("💾 Guardar cambios", key="dlg_us_save") and e_nombre.strip():
+        oid = obra_id_por_nombre(e_obra) if e_obra != "(Todas / sin asignar)" else None
+        ejecutar("UPDATE usuarios SET codigo=?, nombre=?, rol=?, telefono=?, correo=?, "
+                 "obra_id=? WHERE id=?",
+                 (e_codigo.strip(), e_nombre.strip(), e_rol, e_tel, e_correo, oid, int(u["id"])))
+        st.session_state["open_user_dlg"] = False
+        st.rerun()
+    if c2.button("Cancelar", key="dlg_us_cancel"):
+        st.session_state["open_user_dlg"] = False
+        st.rerun()
+
+
 def vista_usuarios(rol: str):
     st.subheader("👤 Usuarios y roles")
     if not puede(rol, "usuarios"):
@@ -1318,6 +1372,29 @@ def vista_usuarios(rol: str):
                      "VALUES(?,?,?,?,?,?,?,1)",
                      (codigo.strip(), nombre.strip(), rol_u, telefono, correo, oid, _hash(clave)))
             st.success(f"Usuario «{nombre}» creado con rol {rol_u}."); st.rerun()
+
+    if not usuarios.empty:
+        st.markdown("---")
+        st.markdown("#### Modificar un usuario")
+        st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
+        if st.button("✏️ Modificar un usuario", key="btn_mod_user"):
+            st.session_state["ask_user"] = True
+            st.session_state["open_user_dlg"] = False
+        if st.session_state.get("ask_user") and not st.session_state.get("open_user_dlg"):
+            cl = st.text_input("Clave del Administrador", type="password", key="cl_user")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("Abrir ventana de edición", key="ok_user"):
+                if verificar_clave_admin(cl):
+                    st.session_state["open_user_dlg"] = True
+                    st.session_state["ask_user"] = False
+                    st.rerun()
+                else:
+                    st.error("Clave del Administrador incorrecta.")
+            if cc2.button("Cancelar", key="cancel_user_ask"):
+                st.session_state["ask_user"] = False
+                st.rerun()
+        if st.session_state.get("open_user_dlg"):
+            dlg_modificar_usuario(usuarios, obras)
 
     if not usuarios.empty:
         st.markdown("#### Restablecer la clave de un usuario")
@@ -1401,7 +1478,7 @@ def dlg_modificar_obra(obras, clientes):
     e_ubic = st.text_input("Ubicación", value=o["ubicacion"] or "")
     e_ing = st.text_input("Responsable de obra", value=o["ingeniero"] or "")
     e_pres = st.number_input("Presupuesto ($ MXN)", min_value=0.0, step=10000.0,
-                             value=float(o["presupuesto"] or 0))
+                             value=float(o["presupuesto"] or 0), format="%.2f")
     est_op = ["En proceso", "Detenida", "Terminada"]
     e_estatus = st.selectbox("Estatus", est_op,
                              index=est_op.index(o["estatus"]) if o["estatus"] in est_op else 0)
@@ -1430,7 +1507,7 @@ def dlg_modificar_contratista(contr):
     e_tel = st.text_input("Teléfono", value=cc["telefono"] or "")
     e_correo = st.text_input("Correo", value=cc["correo"] or "")
     e_monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0,
-                              value=float(cc["monto_contratado"] or 0),
+                              value=float(cc["monto_contratado"] or 0), format="%.2f",
                               help="Tope para el control de destajos de este contratista.")
     c1, c2 = st.columns(2)
     if c1.button("💾 Guardar cambios", key="dlg_co_save") and e_nombre.strip():
@@ -1516,7 +1593,7 @@ def vista_obras(rol: str):
             else:
                 ingeniero = st.text_input("Responsable de obra (regístralo en «Usuarios»)")
         with col2:
-            presupuesto = st.number_input("Presupuesto ($ MXN)", min_value=0.0, step=10000.0)
+            presupuesto = st.number_input("Presupuesto ($ MXN)", min_value=0.0, step=10000.0, format="%.2f")
             inicio = st.date_input("Inicio", HOY)
             fin = st.date_input("Término", HOY + timedelta(days=90))
             estatus = st.selectbox("Estatus", ["En proceso", "Detenida", "Terminada"])
@@ -1607,6 +1684,7 @@ def vista_contratistas(rol: str):
         with col2:
             telefono = st.text_input("Teléfono"); correo = st.text_input("Correo")
             monto_contr = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0,
+                                          format="%.2f",
                                           help="Tope para el control de destajos de este contratista.")
         if st.form_submit_button("➕ Registrar contratista") and nombre.strip():
             ejecutar("INSERT INTO contratistas(codigo,nombre,especialidad,telefono,correo,"
@@ -1626,8 +1704,8 @@ def vista_contratistas(rol: str):
                 obra_lbl = st.selectbox("Obra a asignar", o_labels)
                 concepto = st.text_input("Concepto del trabajo")
             with col2:
-                monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0)
-                anticipo = st.number_input("Anticipo / pagado ($ MXN)", min_value=0.0, step=1000.0)
+                monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
+                anticipo = st.number_input("Anticipo / pagado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
                 avance = st.slider("% Avance", 0, 100, 0)
             if st.form_submit_button("🔗 Asignar a la obra") and concepto.strip():
                 oid = obra_id_por_nombre(o_map[obra_lbl])
@@ -1731,7 +1809,7 @@ def vista_presupuesto(obra_id: int, rol: str):
         col1, col2, col3 = st.columns(3)
         with col1: partida = st.text_input("Partida (ej. Albañilería)")
         with col2: concepto = st.text_input("Concepto")
-        with col3: monto = st.number_input("Monto ($ MXN)", min_value=0.0, step=1000.0)
+        with col3: monto = st.number_input("Monto ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
         if st.form_submit_button("➕ Agregar partida") and partida.strip():
             ejecutar("INSERT INTO presupuesto(obra_id,partida,concepto,monto) VALUES(?,?,?,?)",
                      (obra_id, partida.strip(), concepto, monto))
@@ -1823,7 +1901,7 @@ def vista_requisiciones(obra_id: int, rol: str, usuario: str):
                 proveedor = rp_map[rp_lbl]
             else:
                 proveedor = st.text_input("Proveedor (regístralo en «Proveedores»)")
-            costo = st.number_input("Costo estimado ($ MXN)", min_value=0.0, step=100.0)
+            costo = st.number_input("Costo estimado ($ MXN)", min_value=0.0, step=100.0, format="%.2f")
         if st.form_submit_button("➕ Registrar requisición") and material.strip():
             ejecutar("INSERT INTO requisiciones(obra_id,folio,fecha,solicitante,material,cantidad,"
                      "unidad,proveedor,costo_estimado,estatus) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -1939,8 +2017,8 @@ def vista_destajos(obra_id: int, rol: str):
             concepto = st.text_input("Concepto")
             estatus = st.selectbox("Estatus", ["En proceso", "Terminado", "Detenido"])
         with col2:
-            monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0)
-            pagado = st.number_input("Pagado a la fecha ($ MXN)", min_value=0.0, step=1000.0)
+            monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
+            pagado = st.number_input("Pagado a la fecha ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
             avance = st.slider("% Avance", 0, 100, 0)
         if st.form_submit_button("➕ Registrar destajo") and (contratista or "").strip():
             ejecutar("INSERT INTO destajos(obra_id,contratista,concepto,monto_contratado,pagado,"
@@ -1951,12 +2029,21 @@ def vista_destajos(obra_id: int, rol: str):
         st.markdown("#### Registrar un pago a destajo")
         with st.form("form_dest_pago"):
             contr_sel = st.selectbox("Contratista", dest["contratista"].tolist())
-            abono = st.number_input("Monto del pago ($ MXN)", min_value=0.0, step=1000.0)
+            col1, col2 = st.columns(2)
+            with col1:
+                abono = st.number_input("Monto del pago ($ MXN)", min_value=0.0, step=1000.0,
+                                        format="%.2f")
+                metodo_d = st.selectbox("Método de pago", METODOS_PAGO)
+            with col2:
+                datos_banc = st.text_input("No. tarjeta / CLABE interbancaria / No. cuenta")
+                banco_benef = st.text_input("Banco y nombre del beneficiario")
             if st.form_submit_button("💾 Aplicar pago"):
                 actual = consultar("SELECT pagado FROM destajos WHERE obra_id=? AND contratista=?",
                                    (obra_id, contr_sel))["pagado"].iloc[0]
-                ejecutar("UPDATE destajos SET pagado=? WHERE obra_id=? AND contratista=?",
-                         (float(actual) + abono, obra_id, contr_sel))
+                ejecutar("UPDATE destajos SET pagado=?, metodo_pago=?, datos_bancarios=?, "
+                         "banco_beneficiario=? WHERE obra_id=? AND contratista=?",
+                         (float(actual) + abono, metodo_d, datos_banc.strip(),
+                          banco_benef.strip(), obra_id, contr_sel))
                 st.success(f"Pago de {pesos(abono)} aplicado a {contr_sel}."); st.rerun()
 
 
