@@ -329,6 +329,81 @@ def _secret(clave, default=None):
         return default
 
 
+def email_configurado() -> bool:
+    cfg = _secret("email")
+    return bool(cfg and cfg.get("smtp_host") and cfg.get("user") and cfg.get("password"))
+
+
+def enviar_email(destinatario, asunto, cuerpo, pdf_bytes, nombre_archivo):
+    """Envía un correo con el PDF adjunto vía SMTP (config en st.secrets['email'])."""
+    import smtplib
+    from email.message import EmailMessage
+    cfg = _secret("email") or {}
+    host = cfg.get("smtp_host")
+    port = int(cfg.get("smtp_port", 587))
+    user = cfg.get("user")
+    pwd = cfg.get("password")
+    remitente = cfg.get("from", user)
+    msg = EmailMessage()
+    msg["Subject"] = asunto
+    msg["From"] = remitente
+    msg["To"] = destinatario
+    msg.set_content(cuerpo)
+    if pdf_bytes:
+        msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf",
+                           filename=nombre_archivo)
+    with smtplib.SMTP(host, port, timeout=30) as s:
+        s.starttls()
+        s.login(user, pwd)
+        s.send_message(msg)
+
+
+def bloque_enviar_reporte(pdf_bytes, titulo, nombre_archivo, resumen, clave):
+    """Muestra opciones para enviar un reporte por WhatsApp o email (PDF)."""
+    st.markdown("#### 📤 Enviar este reporte")
+    cw, ce = st.columns(2)
+    with cw:
+        st.markdown("**Por WhatsApp**")
+        num = st.text_input("WhatsApp (lada + número, solo dígitos)", value="52",
+                            key=f"wa_{clave}")
+        num_limpio = "".join(ch for ch in num if ch.isdigit())
+        url = "https://wa.me/" + num_limpio + "?text=" + urllib.parse.quote(resumen)
+        if len(num_limpio) >= 10:
+            try:
+                st.link_button("📲 Abrir WhatsApp con el mensaje", url)
+            except Exception:
+                st.markdown(f"[📲 Abrir WhatsApp con el mensaje]({url})")
+        else:
+            st.caption("Escribe lada + 10 dígitos para habilitar el envío.")
+        st.caption("Adjunta el PDF descargado con un toque (WhatsApp no permite adjuntar "
+                   "archivos automáticamente desde un enlace).")
+    with ce:
+        st.markdown("**Por correo electrónico**")
+        correo = st.text_input("Correo del destinatario", key=f"mail_{clave}")
+        if email_configurado():
+            if st.button("📧 Enviar por email (con el PDF adjunto)", key=f"send_{clave}"):
+                if not correo.strip():
+                    st.warning("Escribe el correo del destinatario.")
+                elif not pdf_bytes:
+                    st.warning("No se pudo generar el PDF.")
+                else:
+                    try:
+                        enviar_email(correo.strip(), titulo, resumen, pdf_bytes, nombre_archivo)
+                        st.success(f"Reporte enviado a {correo.strip()}.")
+                    except Exception as e:
+                        st.error(f"No se pudo enviar el correo: {e}")
+        else:
+            asunto = urllib.parse.quote(titulo)
+            cuerpo = urllib.parse.quote(resumen + "\n\n(Recuerda adjuntar el PDF descargado.)")
+            try:
+                st.link_button("📧 Abrir correo (adjunta el PDF)",
+                               f"mailto:{correo}?subject={asunto}&body={cuerpo}")
+            except Exception:
+                st.markdown(f"[📧 Abrir correo](mailto:{correo}?subject={asunto}&body={cuerpo})")
+            st.caption("Para que el PDF se envíe adjunto automáticamente, configura el correo "
+                       "una sola vez (Ajustes → Secrets). Pídeme la plantilla.")
+
+
 def _sheets_url():
     return _secret("gsheets_url") or cfg_get("gsheets_url")
 
@@ -1997,6 +2072,10 @@ def vista_destajos(obra_id: int, rol: str):
                                data=pdf_pagos_semana(obra_id),
                                file_name=f"Pagos_semana_{HOY.isoformat()}.pdf",
                                mime="application/pdf", key="pdf_pagos_sem")
+            resumen_p = (f"Reporte semanal de pagos a destajos\n"
+                         f"Obra activa - {EMPRESA} - {HOY.isoformat()}")
+            bloque_enviar_reporte(pdf_pagos_semana(obra_id), "Reporte semanal de pagos",
+                                  f"Pagos_semana_{HOY.isoformat()}.pdf", resumen_p, "pagos")
         else:
             st.caption("Para el PDF instala una vez: python -m pip install fpdf2")
     else:
@@ -2335,6 +2414,13 @@ def vista_reportes(obra_id: int):
             components.html(html, height=600, scrolling=True)
         except Exception:
             st.info("Descarga el reporte para verlo completo en tu navegador.")
+
+    if FPDF_OK:
+        st.markdown("---")
+        resumen = (f"Reporte de obra: {nombre}\n"
+                   f"{EMPRESA} - {HOY.isoformat()}")
+        bloque_enviar_reporte(pdf_reporte(obra_id), f"Reporte de obra - {nombre}",
+                              f"Reporte_{base}.pdf", resumen, "rep")
 
 
 # =============================================================================
