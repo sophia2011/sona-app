@@ -220,6 +220,9 @@ def crear_tablas() -> None:
             nombre TEXT, rol TEXT, telefono TEXT, correo TEXT,
             obra_id INTEGER, clave_hash TEXT, activo INTEGER DEFAULT 1);
         CREATE TABLE IF NOT EXISTS config(clave TEXT PRIMARY KEY, valor TEXT);
+        CREATE TABLE IF NOT EXISTS contratos(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            obra_id INTEGER, nombre TEXT, contenido TEXT, fecha TEXT);
     """)
     # Migración: agrega la columna 'codigo' (clave de identificación) si falta
     for tabla in ["obras", "contratistas", "proveedores", "usuarios"]:
@@ -227,6 +230,10 @@ def crear_tablas() -> None:
             conn.execute(f"ALTER TABLE {tabla} ADD COLUMN codigo TEXT")
         except Exception:
             pass
+    try:
+        conn.execute("ALTER TABLE obras ADD COLUMN contrato_link TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -420,6 +427,20 @@ def boton_descarga_adjunto(nombre_archivo: str, etiqueta: str, clave: str):
             st.download_button(etiqueta, data=f.read(), file_name=nombre_archivo, key=clave)
     else:
         st.caption(f"({etiqueta}: archivo no encontrado)")
+
+
+def guardar_contrato(obra_id, archivo):
+    """Guarda el contrato (PDF) dentro de la base de datos, en base64."""
+    import base64
+    contenido = base64.b64encode(archivo.getbuffer()).decode("ascii")
+    ejecutar("DELETE FROM contratos WHERE obra_id=?", (obra_id,))
+    ejecutar("INSERT INTO contratos(obra_id,nombre,contenido,fecha) VALUES(?,?,?,?)",
+             (obra_id, archivo.name, contenido, HOY.isoformat()))
+
+
+def obtener_contrato(obra_id):
+    df = consultar("SELECT nombre,contenido,fecha FROM contratos WHERE obra_id=?", (obra_id,))
+    return df.iloc[0] if not df.empty else None
 
 
 # =============================================================================
@@ -1378,6 +1399,42 @@ def vista_obras(rol: str):
         st.caption("Aún no hay obras registradas. Crea la primera abajo.")
     if not puede(rol, "admin"):
         st.info("Solo el Administrador puede dar de alta o modificar obras."); return
+
+    # ----- Contrato aprobado (PDF) por obra -----
+    if not obras.empty:
+        st.markdown("#### 📄 Contrato aprobado (PDF)")
+        ob_labels_c, ob_map_c = opciones_clave(obras)
+        oc_lbl = st.selectbox("Selecciona la obra", ob_labels_c, key="contrato_obra_sel")
+        oc_id = obra_id_por_nombre(ob_map_c[oc_lbl])
+        actual = obtener_contrato(oc_id)
+        if actual is not None:
+            import base64
+            st.success(f"Contrato cargado: {actual['nombre']}  ·  subido el {actual['fecha']}")
+            st.download_button("📄 Descargar contrato aprobado",
+                               data=base64.b64decode(actual["contenido"]),
+                               file_name=actual["nombre"], mime="application/pdf",
+                               key="dl_contrato")
+        else:
+            st.caption("Esta obra aún no tiene contrato aprobado cargado.")
+        pdf_contrato = st.file_uploader("Cargar / reemplazar contrato aprobado (PDF)",
+                                        type=["pdf"], key="up_contrato")
+        if pdf_contrato is not None and st.button("💾 Guardar contrato", key="save_contrato"):
+            guardar_contrato(oc_id, pdf_contrato)
+            st.success("Contrato aprobado guardado."); st.rerun()
+
+        link_actual = consultar("SELECT contrato_link FROM obras WHERE id=?",
+                                (oc_id,))["contrato_link"].iloc[0]
+        st.caption("Opción recomendada para internet: pega un link del contrato "
+                   "(Google Drive, Dropbox, etc.). El link no se borra al reiniciarse el servidor.")
+        nuevo_link = st.text_input("Link del contrato (opcional)", value=link_actual or "",
+                                   key="contrato_link_in")
+        if st.button("💾 Guardar link del contrato", key="save_link_contrato"):
+            ejecutar("UPDATE obras SET contrato_link=? WHERE id=?", (nuevo_link.strip(), oc_id))
+            st.success("Link del contrato guardado."); st.rerun()
+        if link_actual:
+            st.markdown(f"🔗 [Abrir contrato en el navegador]({link_actual})")
+        st.markdown("---")
+
     st.markdown("#### Dar de alta una nueva obra")
     clientes = obtener_clientes()
     if clientes.empty:
