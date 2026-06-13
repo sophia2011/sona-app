@@ -59,7 +59,7 @@ EMPRESA = "SONA CONSTRUCTORES DEL MAYAB"
 LOGO_PATH = os.path.join(BASE_DIR, "logo_sona.png")  # logo para los reportes (opcional)
 GCP_JSON = os.path.join(BASE_DIR, ".gcp_service_account.json")  # credenciales Google (opcional)
 TABLAS_SYNC = ["clientes", "obras", "etapas", "compras", "requisiciones", "destajos",
-               "bitacora", "contratistas", "presupuesto", "proveedores", "usuarios"]
+               "bitacora", "contratistas", "presupuesto", "proveedores", "usuarios", "abonos"]
 
 
 def pesos(valor) -> str:
@@ -227,6 +227,13 @@ def crear_tablas() -> None:
         CREATE TABLE IF NOT EXISTS contratos_contr(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             contratista_id INTEGER, nombre TEXT, contenido TEXT, fecha TEXT);
+        CREATE TABLE IF NOT EXISTS presupuesto_doc(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            obra_id INTEGER, nombre TEXT, contenido TEXT, fecha TEXT);
+        CREATE TABLE IF NOT EXISTS abonos(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            obra_id INTEGER, fecha TEXT, concepto TEXT, monto REAL,
+            metodo_pago TEXT, nota TEXT);
     """)
     # Migración: agrega la columna 'codigo' (clave de identificación) si falta
     for tabla in ["obras", "contratistas", "proveedores", "usuarios"]:
@@ -236,6 +243,10 @@ def crear_tablas() -> None:
             pass
     try:
         conn.execute("ALTER TABLE obras ADD COLUMN contrato_link TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE obras ADD COLUMN presupuesto_link TEXT")
     except Exception:
         pass
     try:
@@ -572,6 +583,26 @@ def control_contratista(nombre):
     excedido = cap > 0 and (asignado > cap or pagado > cap)
     return {"cap": cap, "asignado": asignado, "pagado": pagado,
             "disponible": cap - asignado, "excedido": excedido}
+
+
+def guardar_presupuesto_pdf(obra_id, archivo):
+    """Guarda el presupuesto (PDF) dentro de la base de datos, en base64."""
+    import base64
+    contenido = base64.b64encode(archivo.getbuffer()).decode("ascii")
+    ejecutar("DELETE FROM presupuesto_doc WHERE obra_id=?", (obra_id,))
+    ejecutar("INSERT INTO presupuesto_doc(obra_id,nombre,contenido,fecha) VALUES(?,?,?,?)",
+             (obra_id, archivo.name, contenido, HOY.isoformat()))
+
+
+def obtener_presupuesto_pdf(obra_id):
+    df = consultar("SELECT nombre,contenido,fecha FROM presupuesto_doc WHERE obra_id=?",
+                   (obra_id,))
+    return df.iloc[0] if not df.empty else None
+
+
+def total_abonos(obra_id) -> float:
+    df = consultar("SELECT COALESCE(SUM(monto),0) t FROM abonos WHERE obra_id=?", (obra_id,))
+    return float(df["t"].iloc[0] or 0)
 
 
 # =============================================================================
@@ -1093,6 +1124,18 @@ def vista_dashboard(obra_id: int):
     c2.metric("Presupuesto", f"{pesos(k['presupuesto'])}")
     c3.metric("Ejercido (compras)", f"{pesos(k['ejercido'])}", f"{k['pct']}% del total")
     c4.metric("Días restantes", f"{k['dias']} días", "Vencida" if k["dias"] < 0 else "En tiempo")
+
+    # Resumen del Control Financiero
+    recibido = total_abonos(obra_id)
+    pagado_dest = consultar("SELECT COALESCE(SUM(pagado),0) p FROM destajos WHERE obra_id=?",
+                            (obra_id,))["p"].iloc[0]
+    egresos = k["ejercido"] + float(pagado_dest or 0)
+    balance = recibido - egresos
+    st.markdown("##### 💰 Control financiero")
+    f1, f2, f3 = st.columns(3)
+    f1.metric("Recibido (abonos)", f"{pesos(recibido)}")
+    f2.metric("Egresos (compras + destajos)", f"{pesos(egresos)}")
+    f3.metric("Balance", f"{pesos(balance)}", "A favor" if balance >= 0 else "En contra")
     st.markdown("---")
     etapas = consultar("SELECT * FROM etapas WHERE obra_id=?", (obra_id,))
     destajos = consultar("SELECT * FROM destajos WHERE obra_id=?", (obra_id,))
@@ -1965,53 +2008,86 @@ def vista_presupuesto(obra_id: int, rol: str):
             ejecutar("INSERT INTO presupuesto(obra_id,partida,concepto,monto) VALUES(?,?,?,?)",
                      (obra_id, partida.strip(), concepto, monto))
             st.success("Partida agregada al presupuesto."); st.rerun()
-    st.markdown("#### Cargar presupuesto desde archivo (CSV o Excel)")
-    st.caption("El archivo debe tener columnas: partida, concepto, monto "
-               "(también acepta 'importe' o 'costo' como monto).")
-    archivo = st.file_uploader("Selecciona el archivo", type=["csv", "xlsx", "xls"])
-    if archivo is not None:
-        dfu = None
-        try:
-            if archivo.name.lower().endswith(".csv"):
-                try:
-                    dfu = pd.read_csv(archivo, sep=None, engine="python", encoding="utf-8-sig")
-                except Exception:
-                    archivo.seek(0)
-                    dfu = pd.read_csv(archivo, sep=";", encoding="latin-1")
-            else:
-                try:
-                    dfu = pd.read_excel(archivo)
-                except ImportError:
-                    st.error("Para leer Excel (.xlsx) instala una sola vez en la terminal:  "
-                             "python -m pip install openpyxl  —  o guarda tu archivo como CSV "
-                             "(Archivo → Guardar como → CSV) y vuelve a subirlo.")
-        except Exception as e:
-            st.error(f"No se pudo leer el archivo: {e}")
-        if dfu is not None:
-            # Normalizar y aceptar sinónimos de columnas
-            dfu.columns = [str(c).strip().lower() for c in dfu.columns]
-            ren = {"importe": "monto", "costo": "monto", "capitulo": "partida",
-                   "capítulo": "partida", "descripcion": "concepto", "descripción": "concepto"}
-            dfu = dfu.rename(columns=ren)
-            faltan = [c for c in ["partida", "concepto", "monto"] if c not in dfu.columns]
-            if faltan:
-                st.error(f"Faltan columnas en el archivo: {', '.join(faltan)}. "
-                         f"Columnas encontradas: {', '.join(dfu.columns)}")
-            else:
-                vista = dfu[["partida", "concepto", "monto"]].head(20)
-                st.dataframe(vista, width="stretch", hide_index=True)
-                if st.button("✅ Importar estas partidas a la obra"):
-                    n = 0
-                    for _, r in dfu.iterrows():
-                        try:
-                            monto = float(str(r["monto"]).replace("$", "").replace(",", "").strip())
-                        except Exception:
-                            monto = 0.0
-                        ejecutar("INSERT INTO presupuesto(obra_id,partida,concepto,monto) "
-                                 "VALUES(?,?,?,?)",
-                                 (obra_id, str(r["partida"]), str(r["concepto"]), monto))
-                        n += 1
-                    st.success(f"Se importaron {n} partidas."); st.rerun()
+    st.markdown("#### 📄 Cargar el presupuesto aprobado (PDF)")
+    actual_pdf = obtener_presupuesto_pdf(obra_id)
+    if actual_pdf is not None:
+        import base64
+        st.success(f"Presupuesto cargado: {actual_pdf['nombre']}  ·  subido el {actual_pdf['fecha']}")
+        st.download_button("📄 Descargar presupuesto aprobado",
+                           data=base64.b64decode(actual_pdf["contenido"]),
+                           file_name=actual_pdf["nombre"], mime="application/pdf",
+                           key="dl_pres_pdf")
+    else:
+        st.caption("Esta obra aún no tiene presupuesto aprobado cargado.")
+    pdf_pres = st.file_uploader("Cargar / reemplazar presupuesto aprobado (PDF)",
+                                type=["pdf"], key="up_pres_pdf")
+    if pdf_pres is not None and st.button("💾 Guardar presupuesto (PDF)", key="save_pres_pdf"):
+        guardar_presupuesto_pdf(obra_id, pdf_pres)
+        st.success("Presupuesto aprobado guardado."); st.rerun()
+
+    link_pres = consultar("SELECT presupuesto_link FROM obras WHERE id=?",
+                          (obra_id,))["presupuesto_link"].iloc[0]
+    st.caption("Opción recomendada para internet: pega un link del presupuesto "
+               "(Google Drive, Dropbox, etc.). El link no se borra al reiniciarse el servidor.")
+    nuevo_link = st.text_input("Link del presupuesto (opcional)", value=link_pres or "",
+                               key="pres_link_in")
+    if st.button("💾 Guardar link del presupuesto", key="save_pres_link"):
+        ejecutar("UPDATE obras SET presupuesto_link=? WHERE id=?", (nuevo_link.strip(), obra_id))
+        st.success("Link del presupuesto guardado."); st.rerun()
+    if link_pres:
+        st.markdown(f"🔗 [Abrir presupuesto en el navegador]({link_pres})")
+
+
+def vista_control_financiero(obra_id: int, rol: str):
+    st.subheader("💰 Control financiero de la obra")
+    if not requiere_obra(obra_id):
+        return
+    abonos = consultar("SELECT * FROM abonos WHERE obra_id=? ORDER BY fecha DESC", (obra_id,))
+    k = calcular_kpis(obra_id)
+    recibido = total_abonos(obra_id)
+    egresos = k["ejercido"]
+    balance = recibido - egresos
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total recibido (abonos)", f"{pesos(recibido)}")
+    c2.metric("Egresos (compras)", f"{pesos(egresos)}")
+    c3.metric("Balance", f"{pesos(balance)}",
+              "A favor" if balance >= 0 else "En contra")
+    if not abonos.empty:
+        tabla = abonos[["fecha", "concepto", "metodo_pago", "monto", "nota"]].copy()
+        tabla["monto"] = tabla["monto"].map(lambda x: f"{pesos(x)}")
+        st.dataframe(tabla.rename(columns={"fecha": "Fecha", "concepto": "Concepto",
+                     "metodo_pago": "Método de pago", "monto": "Monto", "nota": "Nota"}),
+                     width="stretch", hide_index=True)
+    else:
+        st.caption("Aún no hay abonos o pagos registrados para esta obra.")
+    if not puede(rol, "editar"):
+        st.info("Tu rol es de solo lectura."); return
+    st.markdown("---")
+    st.markdown("#### ➕ Registrar un pago o abono recibido")
+    with st.form("form_abono", clear_on_submit=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            fecha = st.date_input("Fecha del abono", HOY)
+            metodo = st.selectbox("Método de pago", METODOS_PAGO)
+        with col2:
+            concepto = st.text_input("Concepto (ej. Anticipo, Estimación 1)")
+            monto = st.number_input("Monto recibido ($ MXN)", min_value=0.0, step=1000.0,
+                                    format="%.2f")
+        with col3:
+            nota = st.text_area("Nota (opcional)", height=90)
+        if st.form_submit_button("💾 Registrar abono") and concepto.strip() and monto > 0:
+            ejecutar("INSERT INTO abonos(obra_id,fecha,concepto,monto,metodo_pago,nota) "
+                     "VALUES(?,?,?,?,?,?)",
+                     (obra_id, fecha.isoformat(), concepto.strip(), monto, metodo, nota.strip()))
+            st.success(f"Abono de {pesos(monto)} registrado."); st.rerun()
+    if not abonos.empty:
+        st.markdown("#### 🗑️ Eliminar un abono")
+        op = {f"{r['fecha']} · {r['concepto']} · {pesos(r['monto'])}": int(r["id"])
+              for _, r in abonos.iterrows()}
+        sel = st.selectbox("Selecciona el abono a eliminar", list(op.keys()), key="del_abono_sel")
+        if st.button("Eliminar abono seleccionado", key="del_abono_btn"):
+            ejecutar("DELETE FROM abonos WHERE id=?", (op[sel],))
+            st.success("Abono eliminado."); st.rerun()
 
 
 def vista_requisiciones(obra_id: int, rol: str, usuario: str):
@@ -2560,8 +2636,9 @@ def main():
     # Menú según el rol: el Administrador ve todo; los demás (residentes), solo lo permitido
     if puede(rol, "admin"):
         secciones = ["Dashboard", "Usuarios", "CRM", "Obras", "Proveedores", "Contratistas",
-                     "Compras", "Presupuesto", "Requisiciones", "Destajos", "Avances y Bitácora",
-                     "Editar / Borrar", "Reportes", "Respaldo", "Google Sheets"]
+                     "Compras", "Presupuesto", "Control Financiero", "Requisiciones", "Destajos",
+                     "Avances y Bitácora", "Editar / Borrar", "Reportes", "Respaldo",
+                     "Google Sheets"]
     else:
         secciones = ["Proveedores", "Contratistas", "Presupuesto", "Requisiciones",
                      "Destajos", "Avances y Bitácora", "Reportes"]
@@ -2588,6 +2665,8 @@ def main():
         vista_compras(obra_id, rol, usuario)
     elif seccion == "Presupuesto":
         vista_presupuesto(obra_id, rol)
+    elif seccion == "Control Financiero":
+        vista_control_financiero(obra_id, rol)
     elif seccion == "Requisiciones":
         vista_requisiciones(obra_id, rol, usuario)
     elif seccion == "Destajos":
