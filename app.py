@@ -107,7 +107,7 @@ COLOR_ACENTO = "#C9842B"
 COLOR_OK = "#4F8A5B"
 COLOR_ALERTA = "#B4554C"
 
-CATEGORIAS_COMPRA = ["Materiales", "Herramienta y/o equipo", "Comidas",
+CATEGORIAS_COMPRA = ["Materiales", "Herramienta y/o equipo", "Gasolina", "Comidas",
                      "Traslados", "Hospedaje", "Viáticos"]
 ESTATUS_REQ = ["Solicitada", "Aprobada", "Comprada", "Entregada"]
 TIPO_CLIENTE = ["Prospecto", "Activo", "Cerrado"]
@@ -1272,6 +1272,15 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                               p_cuenta, p_clabe, p_tarjeta))
                     st.success(f"Proveedor «{p_nombre}» guardado."); st.rerun()
 
+        partidas_pres = consultar("SELECT partida, concepto FROM presupuesto WHERE obra_id=? "
+                                  "ORDER BY partida", (obra_id,))
+        opciones_desc = []
+        for _, rp in partidas_pres.iterrows():
+            etq = str(rp["partida"] or "").strip()
+            if rp["concepto"]:
+                etq = f"{etq} · {rp['concepto']}" if etq else str(rp["concepto"])
+            if etq:
+                opciones_desc.append(etq)
         st.markdown("#### ➕ Registrar una compra")
         with st.form("form_compra", clear_on_submit=True):
             col1, col2, col3 = st.columns(3)
@@ -1279,7 +1288,13 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                 fecha = st.date_input("Fecha de la compra", HOY)
                 categoria = st.selectbox("Categoría del gasto", CATEGORIAS_COMPRA)
             with col2:
-                descripcion = st.text_input("Descripción / concepto")
+                if opciones_desc:
+                    desc_part = st.selectbox("Descripción / concepto (partida del presupuesto)",
+                                             ["(elegir partida)"] + opciones_desc)
+                    desc_otro = st.text_input("...o escribe otra descripción")
+                else:
+                    desc_part = "(elegir partida)"
+                    desc_otro = st.text_input("Descripción / concepto")
                 if prov_labels:
                     prov_label = st.selectbox("Proveedor (del catálogo)", prov_labels)
                     proveedor = prov_map[prov_label]
@@ -1300,6 +1315,8 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                 factura = st.file_uploader("Factura (PDF o XML)",
                                            type=["pdf", "xml", "png", "jpg", "jpeg"])
             enviar = st.form_submit_button("💾 Guardar compra")
+        descripcion = desc_otro.strip() if desc_otro.strip() else (
+            desc_part if desc_part != "(elegir partida)" else "")
         if enviar and descripcion.strip():
             nom_comp = guardar_adjunto(comprobante, "comp")
             nom_fact = guardar_adjunto(factura, "fact")
@@ -1311,7 +1328,7 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
             st.success("Compra registrada y cargada a la obra.")
             st.rerun()
         elif enviar:
-            st.warning("Captura al menos la descripción de la compra.")
+            st.warning("Elige una partida del presupuesto o escribe la descripción de la compra.")
     else:
         st.info("Tu rol (Cliente) es de solo lectura.")
 
@@ -2675,6 +2692,9 @@ def main():
         secciones = ["Dashboard", "Proveedores", "Contratistas", "Compras", "Presupuesto",
                      "Control Financiero", "Requisiciones", "Destajos", "Avances y Bitácora",
                      "Reportes"]
+    elif rol == "Ingeniero de Obra":
+        secciones = ["Proveedores", "Contratistas", "Compras", "Presupuesto", "Requisiciones",
+                     "Destajos", "Avances y Bitácora", "Reportes"]
     else:
         secciones = ["Proveedores", "Contratistas", "Presupuesto", "Requisiciones",
                      "Destajos", "Avances y Bitácora", "Reportes"]
