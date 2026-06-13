@@ -582,88 +582,164 @@ def _lat(s):
     return str(s if s is not None else "").encode("latin-1", "replace").decode("latin-1")
 
 
-def _pdf_base(titulo: str):
-    pdf = FPDF()
+# Paleta profesional basada en el logo (vino / negro)
+PDF_PRIMARY = (123, 18, 18)     # vino del logo
+PDF_DARK = (33, 33, 33)
+PDF_GRAY = (120, 120, 120)
+PDF_ROW = (247, 242, 242)
+PDF_BORDER = (222, 210, 210)
+
+
+class _ReportePDF(FPDF):
+    def footer(self):
+        self.set_y(-15)
+        self.set_draw_color(*PDF_BORDER)
+        self.set_line_width(0.2)
+        self.line(10, self.get_y(), 200, self.get_y())
+        self.set_y(-13)
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(*PDF_GRAY)
+        self.cell(95, 6, _lat(EMPRESA), align="L")
+        self.cell(95, 6, _lat(f"Pagina {self.page_no()}"), align="R")
+
+
+def _pdf_base(titulo: str, subtitulo: str = ""):
+    pdf = _ReportePDF()
+    pdf.set_auto_page_break(True, margin=18)
     pdf.add_page()
-    pdf.set_auto_page_break(True, margin=15)
-    # Logo (si existe) y nombre de la empresa
+    # ---- Encabezado: logo + empresa + fecha ----
     if os.path.exists(LOGO_PATH):
         try:
-            pdf.image(LOGO_PATH, x=10, y=8, w=22)
+            pdf.image(LOGO_PATH, x=10, y=10, w=26)
         except Exception:
             pass
-        pdf.set_x(36)
-    pdf.set_text_color(122, 118, 110)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, _lat(EMPRESA))
-    pdf.ln(8)
-    if os.path.exists(LOGO_PATH):
-        pdf.set_y(max(pdf.get_y(), 33))  # deja libre el espacio del logo
-    pdf.set_x(pdf.l_margin)
-    pdf.set_text_color(47, 111, 106)
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.set_x(pdf.l_margin)
-    pdf.multi_cell(190, 12, _lat(titulo))
-    y = pdf.get_y()
-    pdf.set_draw_color(201, 132, 43)
-    pdf.set_line_width(0.8)
-    pdf.line(10, y, 200, y)
-    pdf.ln(4)
-    pdf.set_text_color(42, 42, 40)
+    pdf.set_xy(40, 11)
+    pdf.set_text_color(*PDF_PRIMARY)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(120, 6, _lat(EMPRESA))
+    pdf.set_xy(40, 18)
+    pdf.set_text_color(*PDF_GRAY)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(120, 5, _lat("Sistema de Control de Obras"))
+    pdf.set_xy(120, 11)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(*PDF_GRAY)
+    pdf.cell(80, 5, _lat(f"Fecha: {HOY.isoformat()}"), align="R")
+    # ---- Línea separadora ----
+    pdf.set_y(31)
+    pdf.set_draw_color(*PDF_PRIMARY)
+    pdf.set_line_width(0.7)
+    pdf.line(10, 31, 200, 31)
+    # ---- Título del reporte ----
+    pdf.set_y(37)
+    pdf.set_x(10)
+    pdf.set_text_color(*PDF_DARK)
+    pdf.set_font("Helvetica", "B", 19)
+    pdf.multi_cell(190, 10, _lat(titulo))
+    if subtitulo:
+        pdf.set_x(10)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(*PDF_GRAY)
+        pdf.multi_cell(190, 6, _lat(subtitulo))
+    pdf.ln(2)
+    pdf.set_text_color(*PDF_DARK)
     return pdf
 
 
 def _pdf_titulo(pdf, t):
-    pdf.ln(2)
-    pdf.set_x(pdf.l_margin)
+    pdf.ln(3)
+    if pdf.get_y() > 265:
+        pdf.add_page()
+    y = pdf.get_y()
+    pdf.set_fill_color(*PDF_PRIMARY)
+    pdf.rect(10, y + 0.8, 2.5, 6, "F")
+    pdf.set_xy(15, y)
     pdf.set_font("Helvetica", "B", 12)
-    pdf.set_text_color(47, 111, 106)
-    pdf.multi_cell(190, 8, _lat(t))
-    pdf.set_text_color(42, 42, 40)
-    pdf.set_x(pdf.l_margin)
+    pdf.set_text_color(*PDF_PRIMARY)
+    pdf.multi_cell(185, 7, _lat(t))
+    pdf.set_text_color(*PDF_DARK)
+    pdf.set_x(10)
 
 
 def _pdf_kv(pdf, pares):
     for k, v in pares:
-        pdf.set_x(pdf.l_margin)
+        pdf.set_x(10)
         pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(*PDF_DARK)
         pdf.cell(55, 8, _lat(k), border=0)
         pdf.set_font("Helvetica", "", 11)
-        pdf.multi_cell(130, 8, _lat(v))
-    pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(135, 8, _lat(v))
+    pdf.set_x(10)
 
 
-def _pdf_parrafo(pdf, texto, size=11, bold=False, color=(42, 42, 40)):
-    pdf.set_x(pdf.l_margin)
+def _pdf_kpis(pdf, items):
+    """Dibuja tarjetas de indicadores (4 por fila)."""
+    pdf.ln(2)
+    x0, w, gap, h, perrow = 10, 45.25, 1.0, 19, 4
+    base_y = pdf.get_y()
+    for i, (label, value) in enumerate(items):
+        fila, col = divmod(i, perrow)
+        x = x0 + col * (w + gap)
+        y = base_y + fila * (h + gap)
+        pdf.set_fill_color(*PDF_ROW)
+        pdf.set_draw_color(*PDF_BORDER)
+        pdf.set_line_width(0.3)
+        pdf.rect(x, y, w, h, "DF")
+        pdf.set_xy(x + 3, y + 3)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(*PDF_GRAY)
+        pdf.cell(w - 6, 4, _lat(label))
+        pdf.set_xy(x + 3, y + 9)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_text_color(*PDF_PRIMARY)
+        pdf.cell(w - 6, 7, _lat(value))
+    filas_tot = (len(items) + perrow - 1) // perrow
+    pdf.set_y(base_y + filas_tot * (h + gap) + 2)
+    pdf.set_x(10)
+    pdf.set_text_color(*PDF_DARK)
+
+
+def _pdf_parrafo(pdf, texto, size=11, bold=False, color=None):
+    pdf.set_x(10)
     pdf.set_font("Helvetica", "B" if bold else "", size)
-    pdf.set_text_color(*color)
+    pdf.set_text_color(*(color if color else PDF_DARK))
     pdf.multi_cell(190, 8, _lat(texto))
-    pdf.set_text_color(42, 42, 40)
-    pdf.set_x(pdf.l_margin)
+    pdf.set_text_color(*PDF_DARK)
+    pdf.set_x(10)
 
 
 def _pdf_tabla(pdf, encabezados, filas, anchos):
-    pdf.set_x(pdf.l_margin)
-    pdf.set_font("Helvetica", "B", 9)
-    pdf.set_fill_color(47, 111, 106)
-    pdf.set_text_color(255, 255, 255)
-    for h, w in zip(encabezados, anchos):
-        pdf.cell(w, 7, _lat(h), border=0, fill=True)
-    pdf.ln(7)
-    pdf.set_text_color(42, 42, 40)
+    def _encabezado():
+        pdf.set_x(10)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_fill_color(*PDF_PRIMARY)
+        pdf.set_text_color(255, 255, 255)
+        for h, w in zip(encabezados, anchos):
+            pdf.cell(w, 8, _lat(h), border=0, fill=True)
+        pdf.ln(8)
+    _encabezado()
     pdf.set_font("Helvetica", "", 9)
+    pdf.set_draw_color(*PDF_BORDER)
+    pdf.set_line_width(0.2)
     fill = False
     for fila in filas:
-        if pdf.get_y() > 275:
+        if pdf.get_y() > 270:
             pdf.add_page()
-        pdf.set_x(pdf.l_margin)
-        pdf.set_fill_color(244, 242, 238)
+            _encabezado()
+            pdf.set_font("Helvetica", "", 9)
+        pdf.set_x(10)
+        pdf.set_text_color(*PDF_DARK)
+        if fill:
+            pdf.set_fill_color(*PDF_ROW)
+        else:
+            pdf.set_fill_color(255, 255, 255)
         for val, w in zip(fila, anchos):
             txt = _lat(str(val))
-            maxc = max(3, int(w / 1.9))
-            pdf.cell(w, 6, txt[:maxc], border=0, fill=fill)
-        pdf.ln(6)
+            maxc = max(4, int(w / 1.7))
+            pdf.cell(w, 7, txt[:maxc], border="B", fill=True)
+        pdf.ln(7)
         fill = not fill
+    pdf.set_text_color(*PDF_DARK)
 
 
 def pdf_compra(compra_id: int) -> bytes:
@@ -679,7 +755,7 @@ def pdf_compra(compra_id: int) -> bytes:
                   ("Metodo de pago", c["metodo_pago"] if "metodo_pago" in c.index
                    and c["metodo_pago"] else "")])
     _pdf_parrafo(pdf, f"Importe: {pesos(c['importe'])} MXN", size=15, bold=True,
-                 color=(47, 111, 106))
+                 color=PDF_PRIMARY)
     if not prov.empty:
         p = prov.iloc[0]
         _pdf_titulo(pdf, "Datos del proveedor")
@@ -704,7 +780,7 @@ def pdf_requisicion(req_id: int) -> bytes:
                   ("Cantidad", f"{r['cantidad']} {r['unidad']}"),
                   ("Proveedor", r["proveedor"] or ""), ("Estatus", r["estatus"])])
     _pdf_parrafo(pdf, f"Costo estimado: {pesos(r['costo_estimado'])} MXN", size=15, bold=True,
-                 color=(47, 111, 106))
+                 color=PDF_PRIMARY)
     pdf.ln(2)
     _pdf_parrafo(pdf, f"Generado por {EMPRESA} - {HOY.isoformat()}",
                  size=9, color=(122, 118, 110))
@@ -714,30 +790,30 @@ def pdf_requisicion(req_id: int) -> bytes:
 def pdf_reporte(obra_id: int) -> bytes:
     k = calcular_kpis(obra_id)
     o = k["obra"]
-    pdf = _pdf_base("Reporte de Obra")
+    pdf = _pdf_base("Reporte de Obra", subtitulo=o["nombre"])
     _pdf_kv(pdf, [("Obra", o["nombre"]), ("Ubicacion", o["ubicacion"] or ""),
-                  ("Responsable", o["ingeniero"] or ""),
-                  ("Avance general", f"{k['avance']}%"),
-                  ("Presupuesto", f"{pesos(k['presupuesto'])}"),
-                  ("Ejercido", f"{pesos(k['ejercido'])} ({k['pct']}%)"),
-                  ("Dias restantes", str(k["dias"]))])
+                  ("Responsable", o["ingeniero"] or "")])
+    _pdf_kpis(pdf, [("% Avance general", f"{k['avance']}%"),
+                    ("Presupuesto", f"{pesos(k['presupuesto'])}"),
+                    ("Ejercido", f"{pesos(k['ejercido'])}"),
+                    ("Dias restantes", str(k["dias"]))])
     et = consultar("SELECT etapa,estado,avance FROM etapas WHERE obra_id=?", (obra_id,))
     if not et.empty:
         _pdf_titulo(pdf, "Avance por etapa")
-        _pdf_tabla(pdf, ["Etapa", "Estado", "%"], et.values.tolist(), [110, 50, 20])
+        _pdf_tabla(pdf, ["Etapa", "Estado", "%"], et.values.tolist(), [120, 50, 20])
     comp = consultar("SELECT categoria, SUM(importe) t FROM compras WHERE obra_id=? GROUP BY categoria",
                      (obra_id,))
     if not comp.empty:
         _pdf_titulo(pdf, "Compras por categoria")
         _pdf_tabla(pdf, ["Categoria", "Total"],
-                   [[r[0], f"{pesos(r[1])}"] for r in comp.values.tolist()], [110, 70])
+                   [[r[0], f"{pesos(r[1])}"] for r in comp.values.tolist()], [120, 70])
     de = consultar("SELECT contratista,monto_contratado,pagado FROM destajos WHERE obra_id=?",
                    (obra_id,))
     if not de.empty:
         _pdf_titulo(pdf, "Destajos")
         _pdf_tabla(pdf, ["Contratista", "Contratado", "Pagado"],
                    [[r[0], f"{pesos(r[1])}", f"{pesos(r[2])}"] for r in de.values.tolist()],
-                   [90, 50, 40])
+                   [100, 45, 45])
     return bytes(pdf.output())
 
 
@@ -998,7 +1074,7 @@ def pdf_pagos_semana(obra_id: int) -> bytes:
     if not hay:
         _pdf_parrafo(pdf, "No hay saldos pendientes de pago.")
     _pdf_parrafo(pdf, f"TOTAL A PAGAR: {pesos(total)} MXN", size=15, bold=True,
-                 color=(47, 111, 106))
+                 color=PDF_PRIMARY)
     pdf.ln(2)
     _pdf_parrafo(pdf, f"Generado por {EMPRESA} - {HOY.isoformat()}", size=9,
                  color=(122, 118, 110))
