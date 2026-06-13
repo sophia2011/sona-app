@@ -23,7 +23,7 @@ import shutil
 import sqlite3
 import hashlib
 import urllib.parse
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -102,6 +102,11 @@ st.set_page_config(page_title="Constructor PRO · CRM y Obras",
                    page_icon="🏗️", layout="wide", initial_sidebar_state="expanded")
 
 HOY = date.today()
+
+
+def ahora_mx() -> datetime:
+    """Fecha y hora actual en horario del centro de México (UTC-6)."""
+    return datetime.now(timezone.utc) - timedelta(hours=6)
 COLOR_PRIMARIO = "#2F6F6A"
 COLOR_ACENTO = "#C9842B"
 COLOR_OK = "#4F8A5B"
@@ -259,6 +264,10 @@ def crear_tablas() -> None:
         pass
     try:
         conn.execute("ALTER TABLE compras ADD COLUMN metodo_pago TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE compras ADD COLUMN hora TEXT")
     except Exception:
         pass
     for col in ["metodo_pago", "datos_bancarios", "banco_beneficiario"]:
@@ -800,6 +809,37 @@ def pdf_compra(compra_id: int) -> bytes:
     return bytes(pdf.output())
 
 
+def pdf_compras_lista(obra_id: int, ids: list, solicitante: str) -> bytes:
+    """Documento imprimible de las compras a realizar (con fecha, hora y solicitante)."""
+    o = consultar("SELECT nombre,ubicacion FROM obras WHERE id=?", (obra_id,))
+    on = o["nombre"].iloc[0] if not o.empty else ""
+    ahora = ahora_mx()
+    pdf = _pdf_base("Compras a realizar", subtitulo=on)
+    _pdf_kv(pdf, [("Fecha", ahora.strftime("%d/%m/%Y")),
+                  ("Hora", ahora.strftime("%H:%M")),
+                  ("Solicita la compra", solicitante or "")])
+    if not ids:
+        _pdf_parrafo(pdf, "No se seleccionaron compras.")
+        return bytes(pdf.output())
+    marcas = ",".join("?" * len(ids))
+    comp = consultar(f"SELECT fecha,hora,categoria,descripcion,proveedor,metodo_pago,comprador,"
+                     f"importe FROM compras WHERE id IN ({marcas}) ORDER BY fecha, id", ids)
+    filas, total = [], 0.0
+    for _, r in comp.iterrows():
+        filas.append([r["fecha"] or "", r["hora"] or "", str(r["descripcion"] or ""),
+                      str(r["proveedor"] or ""), str(r["metodo_pago"] or ""),
+                      f"{pesos(r['importe'])}"])
+        total += float(r["importe"] or 0)
+    _pdf_titulo(pdf, "Detalle de compras")
+    _pdf_tabla(pdf, ["Fecha", "Hora", "Concepto", "Proveedor", "Metodo", "Importe"],
+               filas, [20, 14, 60, 44, 30, 22])
+    _pdf_parrafo(pdf, f"TOTAL: {pesos(total)} MXN", size=14, bold=True, color=PDF_PRIMARY)
+    pdf.ln(2)
+    _pdf_parrafo(pdf, f"Generado por {EMPRESA} - {ahora.strftime('%d/%m/%Y %H:%M')}",
+                 size=9, color=(122, 118, 110))
+    return bytes(pdf.output())
+
+
 def pdf_requisicion(req_id: int) -> bytes:
     r = consultar("SELECT * FROM requisiciones WHERE id=?", (req_id,)).iloc[0]
     obra = consultar("SELECT nombre,ubicacion FROM obras WHERE id=?", (int(r["obra_id"]),))
@@ -1321,10 +1361,11 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
             nom_comp = guardar_adjunto(comprobante, "comp")
             nom_fact = guardar_adjunto(factura, "fact")
             ejecutar("INSERT INTO compras(obra_id,fecha,categoria,descripcion,importe,"
-                     "proveedor,comprador,comprobante,factura,metodo_pago) "
-                     "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     "proveedor,comprador,comprobante,factura,metodo_pago,hora) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                      (obra_id, fecha.isoformat(), categoria, descripcion.strip(), importe,
-                      proveedor, comprador.strip(), nom_comp, nom_fact, metodo_pago))
+                      proveedor, comprador.strip(), nom_comp, nom_fact, metodo_pago,
+                      ahora_mx().strftime("%H:%M")))
             st.success("Compra registrada y cargada a la obra.")
             st.rerun()
         elif enviar:
@@ -1346,6 +1387,26 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                  "comprador": "Comprador", "metodo_pago": "Método de pago",
                  "importe": "Importe"}),
                  width="stretch", hide_index=True)
+
+    # ---- Imprimir la o las compras a realizar ----
+    st.markdown("#### 🖨️ Imprimir compras a realizar")
+    st.caption("Selecciona una o varias compras; el documento incluye fecha, hora y quién solicita.")
+    opciones_imp = {
+        f"{r['fecha']} · {r['descripcion']} · {pesos(r['importe'])}": int(r["id"])
+        for _, r in compras.iterrows()}
+    sel_imp = st.multiselect("Compras a imprimir", list(opciones_imp.keys()),
+                             default=list(opciones_imp.keys()), key="imp_compras_sel")
+    ids_imp = [opciones_imp[s] for s in sel_imp]
+    if FPDF_OK:
+        if ids_imp:
+            st.download_button("📄 Descargar documento de compras (PDF)",
+                               data=pdf_compras_lista(obra_id, ids_imp, usuario),
+                               file_name=f"Compras_a_realizar_{HOY.isoformat()}.pdf",
+                               mime="application/pdf", key="dl_compras_lista")
+        else:
+            st.caption("Selecciona al menos una compra para generar el documento.")
+    else:
+        st.caption("Para el PDF instala una vez: python -m pip install fpdf2")
 
     st.markdown("#### Comprobante PDF, adjuntos y factura por compra")
     con_adjuntos = compras[compras.apply(
