@@ -1306,13 +1306,15 @@ def grafica_destajos(df):
     return _mate(fig, 360)
 
 
-def grafica_compras_categoria(df):
+def grafica_compras_categoria(df, titulo="Compras por categoría"):
     if df.empty:
-        return _mate(go.Figure().add_annotation(text="Sin compras registradas", showarrow=False), 300)
+        return _mate(go.Figure().add_annotation(text="Sin registros", showarrow=False), 300)
+    df = df.copy()
+    df["importe"] = pd.to_numeric(df["importe"], errors="coerce").fillna(0)
     g = df.groupby("categoria", as_index=False)["importe"].sum().sort_values("importe")
     g["_etq"] = g["importe"].map(pesos)
     fig = px.bar(g, x="importe", y="categoria", orientation="h",
-                 title="Compras por categoría", text="_etq",
+                 title=titulo, text="_etq",
                  color_discrete_sequence=[COLOR_PRIMARIO])
     fig.update_traces(textposition="outside")
     fig.update_layout(xaxis_title="MXN", yaxis_title="")
@@ -1556,7 +1558,9 @@ def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
                   f"{pesos(importes.sum())}")
         hoy_total = importes[fechas == HOY.isoformat()].sum()
         c3.metric("Gastado hoy" if es_gasto else "Comprado hoy", f"{pesos(hoy_total)}")
-        st.plotly_chart(grafica_compras_categoria(compras), width="stretch", key=f"plt_6{suf}")
+        st.plotly_chart(grafica_compras_categoria(
+            compras, "Gastos por categoría" if es_gasto else "Compras por categoría"),
+            width="stretch", key=f"plt_6{suf}")
 
     if puede(rol, "editar"):
         # Alta rápida de proveedor (fuera del formulario para refrescar el listado)
