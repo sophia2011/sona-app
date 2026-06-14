@@ -2604,6 +2604,7 @@ def vista_destajos(obra_id: int, rol: str):
             did = dict(opc)[sel]
             col1, col2 = st.columns(2)
             with col1:
+                fecha_pago = st.date_input("Fecha de pago", HOY)
                 abono = st.number_input("Monto del pago ($ MXN)", min_value=0.0, step=1000.0,
                                         format="%.2f")
                 metodo_d = st.selectbox("Método de pago", METODOS_PAGO)
@@ -2634,8 +2635,8 @@ def vista_destajos(obra_id: int, rol: str):
                          "monto,metodo_pago,datos_bancarios,banco_beneficiario) "
                          "VALUES(?,?,?,?,?,?,?,?,?)",
                          (did, obra_id, drow["contratista"], drow["concepto"],
-                          ahora_mx().strftime("%Y-%m-%d %H:%M"), abono, metodo_d,
-                          mayus(datos_banc), mayus(banco_benef)))
+                          fecha_pago.isoformat() + " " + ahora_mx().strftime("%H:%M"), abono,
+                          metodo_d, mayus(datos_banc), mayus(banco_benef)))
                 msg = f"Anticipo {num} de {pesos(abono)} aplicado."
                 if excede:
                     msg += " (AUTORIZADO por el Administrador: rebasa lo contratado)"
