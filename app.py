@@ -2428,18 +2428,20 @@ def vista_presupuesto(obra_id: int, rol: str):
     pres = consultar("SELECT * FROM presupuesto WHERE obra_id=? ORDER BY partida", (obra_id,))
     k = calcular_kpis(obra_id)
     total_cargado = pres["monto"].sum() if not pres.empty else 0.0
+    ejercido_total = k["egresos"]
+    pct_ej = round(ejercido_total / k["presupuesto"] * 100, 1) if k["presupuesto"] else 0
     c1, c2, c3 = st.columns(3)
     c1.metric("Presupuesto cargado", f"{pesos(total_cargado)}")
     c2.metric("Presupuesto de la obra", f"{pesos(k['presupuesto'])}")
-    c3.metric("Ejercido (compras)", f"{pesos(k['ejercido'])}", f"{k['pct']}%")
+    c3.metric("Ejercido (compras + gastos + destajos)", f"{pesos(ejercido_total)}", f"{pct_ej}%")
     if not pres.empty:
         st.plotly_chart(grafica_presupuesto_partidas(pres), width="stretch", key="plt_7")
         comp = pd.DataFrame({"Concepto": ["Presupuesto cargado", "Ejercido"],
-                             "Monto": [total_cargado, k["ejercido"]]})
+                             "Monto": [total_cargado, ejercido_total]})
         comp["_etq"] = comp["Monto"].map(pesos)
         fig = px.bar(comp, x="Concepto", y="Monto", text="_etq", color="Concepto",
                      color_discrete_sequence=[COLOR_PRIMARIO, COLOR_ACENTO],
-                     title="Presupuesto cargado vs Ejercido")
+                     title="Presupuesto cargado vs Ejercido (compras + gastos + destajos)")
         fig.update_traces(textposition="outside")
         st.plotly_chart(_mate(fig, 340), width="stretch", key="plt_8")
         tabla = pres[["partida", "concepto", "monto"]].copy()
