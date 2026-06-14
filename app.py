@@ -1409,10 +1409,12 @@ def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
                     desc_part = "(elegir partida)"
                     desc_otro = st.text_input("Descripción / concepto")
                 if prov_labels:
-                    prov_label = st.selectbox("Proveedor (del catálogo)", prov_labels)
-                    proveedor = prov_map[prov_label]
+                    prov_label = st.selectbox("Proveedor (del catálogo)",
+                                              ["(Escribir proveedor manualmente)"] + prov_labels)
+                    prov_libre = st.text_input("...o escribe el proveedor (sin usar el catálogo)")
                 else:
-                    proveedor = st.text_input("Proveedor (regístralo arriba o en «Proveedores»)")
+                    prov_label = "(Escribir proveedor manualmente)"
+                    prov_libre = st.text_input("Proveedor")
             with col3:
                 importe = st.number_input("Importe ($ MXN)", min_value=0.0, step=10.0, format="%.2f")
                 if compradores:
@@ -1430,6 +1432,9 @@ def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
             enviar = st.form_submit_button(f"💾 Guardar {noun}")
         descripcion = desc_otro.strip() if desc_otro.strip() else (
             desc_part if desc_part != "(elegir partida)" else "")
+        proveedor = (mayus(prov_libre) if prov_libre.strip()
+                     else (prov_map.get(prov_label, "")
+                           if prov_label != "(Escribir proveedor manualmente)" else ""))
         if enviar and descripcion.strip():
             nom_comp = guardar_adjunto(comprobante, "comp")
             nom_fact = guardar_adjunto(factura, "fact")
