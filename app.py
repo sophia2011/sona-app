@@ -2533,8 +2533,12 @@ def vista_destajos(obra_id: int, rol: str):
             st.success("Destajo registrado."); st.rerun()
     if not dest.empty:
         st.markdown("#### Registrar un pago a destajo")
+        st.caption("Cada pago se numera como Anticipo 1, 2, 3… Si el pago rebasa lo contratado, "
+                   "se pedirá la clave del Administrador para autorizarlo.")
         with st.form("form_dest_pago"):
-            opc = [(f"{i+1}. {r['contratista']} · {r['concepto']}", int(r["id"]))
+            opc = [(f"{i+1}. {r['contratista']} · {r['concepto']}  "
+                    f"(saldo {pesos(float(r['monto_contratado'] or 0) - float(r['pagado'] or 0))})",
+                    int(r["id"]))
                    for i, (_, r) in enumerate(dest.iterrows())]
             etiquetas = [e for e, _ in opc]
             sel = st.selectbox("Destajo a pagar (contratista · concepto)", etiquetas)
@@ -2547,21 +2551,36 @@ def vista_destajos(obra_id: int, rol: str):
             with col2:
                 datos_banc = st.text_input("No. tarjeta / CLABE interbancaria / No. cuenta")
                 banco_benef = st.text_input("Banco y nombre del beneficiario")
-            if st.form_submit_button("💾 Aplicar pago"):
-                drow = consultar("SELECT contratista,concepto,pagado FROM destajos WHERE id=?",
-                                 (did,)).iloc[0]
-                actual = float(drow["pagado"] or 0)
+            clave_exc = st.text_input("Clave del Administrador (solo si el pago rebasa lo "
+                                      "contratado)", type="password", key="pago_exc_clave")
+            aplicar = st.form_submit_button("💾 Aplicar pago")
+        if aplicar and abono > 0:
+            drow = consultar("SELECT contratista,concepto,pagado,monto_contratado "
+                             "FROM destajos WHERE id=?", (did,)).iloc[0]
+            actual = float(drow["pagado"] or 0)
+            cap = float(drow["monto_contratado"] or 0)
+            nuevo_total = actual + abono
+            excede = cap > 0 and nuevo_total > cap + 0.009
+            if excede and not verificar_clave_admin(clave_exc):
+                st.error(f"⚠️ PRESUPUESTO EXCEDIDO. Con este pago el acumulado sería "
+                         f"{pesos(nuevo_total)}, que supera lo contratado ({pesos(cap)}). "
+                         f"No se registró. Para autorizarlo, captura la clave del Administrador.")
+            else:
+                num = int(consultar("SELECT COUNT(*) n FROM pagos_destajo WHERE destajo_id=?",
+                                    (did,))["n"].iloc[0]) + 1
                 ejecutar("UPDATE destajos SET pagado=?, metodo_pago=?, datos_bancarios=?, "
                          "banco_beneficiario=? WHERE id=?",
-                         (actual + abono, metodo_d, mayus(datos_banc),
-                          mayus(banco_benef), did))
+                         (nuevo_total, metodo_d, mayus(datos_banc), mayus(banco_benef), did))
                 ejecutar("INSERT INTO pagos_destajo(destajo_id,obra_id,contratista,concepto,fecha,"
                          "monto,metodo_pago,datos_bancarios,banco_beneficiario) "
                          "VALUES(?,?,?,?,?,?,?,?,?)",
                          (did, obra_id, drow["contratista"], drow["concepto"],
                           ahora_mx().strftime("%Y-%m-%d %H:%M"), abono, metodo_d,
                           mayus(datos_banc), mayus(banco_benef)))
-                st.success(f"Pago de {pesos(abono)} aplicado."); st.rerun()
+                msg = f"Anticipo {num} de {pesos(abono)} aplicado."
+                if excede:
+                    msg += " (AUTORIZADO por el Administrador: rebasa lo contratado)"
+                st.success(msg); st.rerun()
 
     # ----- Pagos por contratista (ventana desplegable) -----
     if not dest.empty:
@@ -2579,17 +2598,22 @@ def vista_destajos(obra_id: int, rol: str):
                 st.dataframe(tp.rename(columns={"concepto": "Concepto",
                              "monto_contratado": "Contratado", "pagado": "Pagado",
                              "saldo": "Saldo"}), width="stretch", hide_index=True)
-                log = consultar("SELECT fecha,concepto,monto,metodo_pago,banco_beneficiario "
-                                "FROM pagos_destajo WHERE obra_id=? AND contratista=? "
-                                "ORDER BY fecha DESC", (obra_id, nom))
+                log = consultar("SELECT destajo_id,fecha,concepto,monto,metodo_pago,"
+                                "banco_beneficiario FROM pagos_destajo WHERE obra_id=? AND "
+                                "contratista=? ORDER BY destajo_id, fecha ASC, id ASC",
+                                (obra_id, nom))
                 if not log.empty:
-                    st.markdown("**Pagos realizados (detalle por semana):**")
+                    st.markdown("**Pagos realizados (detalle por anticipo y semana):**")
                     lg = log.copy()
-                    lg.insert(0, "semana", lg["fecha"].map(semana_de))
+                    lg["anticipo"] = (lg.groupby("destajo_id").cumcount() + 1).map(
+                        lambda n: f"Anticipo {n}")
+                    lg["semana"] = lg["fecha"].map(semana_de)
                     lg["monto"] = lg["monto"].map(lambda x: f"{pesos(x)}")
-                    st.dataframe(lg.rename(columns={"semana": "Semana", "fecha": "Fecha y hora",
-                                 "concepto": "Concepto", "monto": "Monto",
-                                 "metodo_pago": "Método",
+                    cols_log = ["anticipo", "semana", "fecha", "concepto", "monto", "metodo_pago",
+                                "banco_beneficiario"]
+                    st.dataframe(lg[cols_log].rename(columns={"anticipo": "Anticipo",
+                                 "semana": "Semana", "fecha": "Fecha y hora", "concepto": "Concepto",
+                                 "monto": "Monto", "metodo_pago": "Método",
                                  "banco_beneficiario": "Banco / Beneficiario"}),
                                  width="stretch", hide_index=True)
                     # Subtotal por semana
