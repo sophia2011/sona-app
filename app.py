@@ -348,6 +348,11 @@ def crear_tablas() -> None:
         conn.execute("ALTER TABLE requisiciones ADD COLUMN metodo_pago TEXT")
     except Exception:
         pass
+    for col, deff in [("avance", "REAL DEFAULT 0"), ("estado", "TEXT DEFAULT 'Por iniciar'")]:
+        try:
+            conn.execute(f"ALTER TABLE presupuesto ADD COLUMN {col} {deff}")
+        except Exception:
+            pass
     for col in ["metodo_pago", "datos_bancarios", "banco_beneficiario"]:
         try:
             conn.execute(f"ALTER TABLE destajos ADD COLUMN {col} TEXT")
@@ -1152,8 +1157,12 @@ def requiere_obra(obra_id: int) -> bool:
 # =============================================================================
 def calcular_kpis(obra_id: int) -> dict:
     obra = consultar("SELECT * FROM obras WHERE id = ?", (obra_id,)).iloc[0]
-    etapas = consultar("SELECT avance FROM etapas WHERE obra_id = ?", (obra_id,))
-    avance = round(etapas["avance"].mean(), 1) if not etapas.empty else 0.0
+    pres_av = consultar("SELECT avance FROM presupuesto WHERE obra_id = ?", (obra_id,))
+    if not pres_av.empty and pres_av["avance"].notna().any():
+        avance = round(pres_av["avance"].fillna(0).mean(), 1)
+    else:
+        etapas = consultar("SELECT avance FROM etapas WHERE obra_id = ?", (obra_id,))
+        avance = round(etapas["avance"].mean(), 1) if not etapas.empty else 0.0
     ejercido = consultar("SELECT COALESCE(SUM(importe),0) AS s FROM compras WHERE obra_id=?",
                          (obra_id,))["s"].iloc[0]
     compras_solo = consultar("SELECT COALESCE(SUM(importe),0) AS s FROM compras WHERE obra_id=? "
@@ -2785,19 +2794,41 @@ def vista_avances(obra_id: int, rol: str, usuario: str):
         return
     if not puede(rol, "editar"):
         st.info("Tu rol (Cliente) es de solo lectura.")
-    etapas = consultar("SELECT * FROM etapas WHERE obra_id=?", (obra_id,))
-    if puede(rol, "editar") and not etapas.empty:
-        st.markdown("#### Actualizar avance de una etapa")
-        with st.form("form_avance"):
-            etapa_sel = st.selectbox("Etapa", etapas["etapa"].tolist())
-            fila = etapas[etapas["etapa"] == etapa_sel].iloc[0]
-            nuevo = st.slider("% de avance", 0, 100, int(fila["avance"]))
-            estado = st.selectbox("Estado", ["Por iniciar", "En proceso", "Completada"],
-                                  index=["Por iniciar", "En proceso", "Completada"].index(fila["estado"]))
-            if st.form_submit_button("💾 Guardar avance"):
-                ejecutar("UPDATE etapas SET avance=?, estado=? WHERE id=?",
-                         (nuevo, estado, int(fila["id"])))
-                st.success(f"Etapa «{etapa_sel}» → {nuevo}%."); st.rerun()
+    pres = consultar("SELECT * FROM presupuesto WHERE obra_id=? ORDER BY partida, id", (obra_id,))
+    if puede(rol, "editar"):
+        st.markdown("#### Actualizar avance de una partida")
+        if pres.empty:
+            st.info("Aún no hay partidas. Captúralas en la sección «Presupuesto» "
+                    "(Cargar una partida) y aquí aparecerán para actualizar su avance.")
+        else:
+            etqs, ids = [], []
+            for i, (_, rp) in enumerate(pres.iterrows()):
+                e = str(rp["partida"] or "").strip()
+                if rp["concepto"]:
+                    e = f"{e} · {rp['concepto']}" if e else str(rp["concepto"])
+                etqs.append(f"{i + 1}. {e or 'Partida'}")
+                ids.append(int(rp["id"]))
+            with st.form("form_avance"):
+                sel = st.selectbox("Partida del presupuesto", etqs)
+                pid = ids[etqs.index(sel)]
+                fila = pres[pres["id"] == pid].iloc[0]
+                av_act = int(fila["avance"]) if "avance" in pres.columns and pd.notna(fila["avance"]) else 0
+                nuevo = st.slider("% de avance", 0, 100, av_act)
+                est_op = ["Por iniciar", "En proceso", "Completada"]
+                est_act = fila["estado"] if "estado" in pres.columns and fila["estado"] in est_op else "Por iniciar"
+                estado = st.selectbox("Estado", est_op, index=est_op.index(est_act))
+                if st.form_submit_button("💾 Guardar avance"):
+                    ejecutar("UPDATE presupuesto SET avance=?, estado=? WHERE id=?",
+                             (nuevo, estado, pid))
+                    st.success(f"Partida «{sel}» → {nuevo}%."); st.rerun()
+            tabla_av = pres.copy()
+            if "avance" in tabla_av.columns:
+                tabla_av["avance"] = tabla_av["avance"].fillna(0).map(lambda x: f"{int(x)}%")
+            cols_av = ["partida", "concepto", "avance", "estado"]
+            cols_av = [c for c in cols_av if c in tabla_av.columns]
+            st.dataframe(tabla_av[cols_av].rename(columns={"partida": "Partida",
+                         "concepto": "Concepto", "avance": "% Avance", "estado": "Estado"}),
+                         width="stretch", hide_index=True)
         st.markdown("---")
     if puede(rol, "editar"):
         st.markdown("#### Nueva nota de bitácora")
