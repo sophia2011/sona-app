@@ -216,21 +216,17 @@ def _marcar_cambio(sql: str) -> None:
 
 
 def sincronizar_tablas(tablas) -> int:
-    """Sube a Google Sheets solo las tablas indicadas (para el autoguardado)."""
+    """Sube a Google Sheets solo las hojas afectadas (para el autoguardado)."""
     sh = _abrir_spreadsheet()
-    n = 0
+    hojas = []
     for t in tablas:
-        if t not in TABLAS_SYNC:
-            continue
-        df = consultar(f"SELECT * FROM {t}")
-        datos = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
-        try:
-            ws = sh.worksheet(t)
-            ws.clear()
-        except Exception:
-            ws = sh.add_worksheet(title=t, rows=max(20, len(df) + 5),
-                                  cols=max(5, len(df.columns) + 2))
-        ws.update(datos)
+        if t == "compras":
+            hojas += ["compras", "gastos"]
+        elif t in HOJAS_SYNC:
+            hojas.append(t)
+    n = 0
+    for hoja in dict.fromkeys(hojas):
+        _escribir_hoja(sh, hoja, df_para_hoja(hoja))
         n += 1
     return n
 
@@ -526,20 +522,39 @@ def _abrir_spreadsheet():
     return gc.open_by_url(_sheets_url())
 
 
+HOJAS_SYNC = ["clientes", "obras", "etapas", "compras", "gastos", "requisiciones", "destajos",
+              "pagos_destajo", "bitacora", "contratistas", "presupuesto", "proveedores",
+              "usuarios", "abonos"]
+
+
+def df_para_hoja(hoja: str):
+    """Devuelve los datos para una hoja de Google Sheets, ordenados del más nuevo al más antiguo.
+    'compras' y 'gastos' salen de la misma tabla (separadas por su tipo)."""
+    if hoja == "compras":
+        return consultar("SELECT * FROM compras WHERE tipo IS NULL OR tipo='compra' "
+                         "ORDER BY id DESC")
+    if hoja == "gastos":
+        return consultar("SELECT * FROM compras WHERE tipo='gasto' ORDER BY id DESC")
+    return consultar(f"SELECT * FROM {hoja} ORDER BY id DESC")
+
+
+def _escribir_hoja(sh, hoja, df):
+    datos = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
+    try:
+        ws = sh.worksheet(hoja)
+        ws.clear()
+    except Exception:
+        ws = sh.add_worksheet(title=hoja, rows=max(20, len(df) + 5),
+                              cols=max(5, len(df.columns) + 2))
+    ws.update(datos)
+
+
 def sincronizar_a_sheets() -> int:
-    """Sube (exporta) todas las tablas locales al Google Sheet."""
+    """Sube (exporta) todas las tablas locales al Google Sheet (incluida la hoja de gastos)."""
     sh = _abrir_spreadsheet()
     n = 0
-    for t in TABLAS_SYNC:
-        df = consultar(f"SELECT * FROM {t}")
-        datos = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
-        try:
-            ws = sh.worksheet(t)
-            ws.clear()
-        except Exception:
-            ws = sh.add_worksheet(title=t, rows=max(20, len(df) + 5),
-                                  cols=max(5, len(df.columns) + 2))
-        ws.update(datos)
+    for hoja in HOJAS_SYNC:
+        _escribir_hoja(sh, hoja, df_para_hoja(hoja))
         n += 1
     return n
 
@@ -548,21 +563,25 @@ def traer_de_sheets() -> int:
     """Trae (importa) los datos del Google Sheet y reemplaza las tablas locales."""
     sh = _abrir_spreadsheet()
     n = 0
-    for t in TABLAS_SYNC:
+    borradas = set()
+    for hoja in HOJAS_SYNC:
         try:
-            ws = sh.worksheet(t)
+            ws = sh.worksheet(hoja)
         except Exception:
             continue
         registros = ws.get_all_records()
+        tabla = "compras" if hoja in ("compras", "gastos") else hoja
+        if tabla not in borradas:
+            ejecutar(f"DELETE FROM {tabla}")
+            borradas.add(tabla)
         if not registros:
             continue
-        ejecutar(f"DELETE FROM {t}")
         for r in registros:
             cols = list(r.keys())
             vals = [None if (v == "") else v for v in r.values()]
             ph = ",".join(["?"] * len(cols))
             try:
-                ejecutar(f"INSERT INTO {t}({','.join(cols)}) VALUES({ph})", tuple(vals))
+                ejecutar(f"INSERT INTO {tabla}({','.join(cols)}) VALUES({ph})", tuple(vals))
             except Exception:
                 pass
         n += 1
@@ -574,11 +593,11 @@ def exportar_excel_bytes() -> bytes:
     import io
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        for t in TABLAS_SYNC:
-            df = consultar(f"SELECT * FROM {t}")
+        for hoja in HOJAS_SYNC:
+            df = df_para_hoja(hoja)
             if df.empty:
                 df = pd.DataFrame({"(sin registros)": []})
-            df.to_excel(w, sheet_name=t[:31], index=False)
+            df.to_excel(w, sheet_name=hoja[:31], index=False)
     return buf.getvalue()
 
 
@@ -588,8 +607,8 @@ def exportar_zip_csv_bytes() -> bytes:
     import zipfile
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for t in TABLAS_SYNC:
-            z.writestr(f"{t}.csv", consultar(f"SELECT * FROM {t}").to_csv(index=False))
+        for hoja in HOJAS_SYNC:
+            z.writestr(f"{hoja}.csv", df_para_hoja(hoja).to_csv(index=False))
     return buf.getvalue()
 
 
