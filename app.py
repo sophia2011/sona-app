@@ -231,12 +231,22 @@ def sincronizar_tablas(tablas) -> int:
     return n
 
 
+COLUMNAS_NUMERICAS = {"importe", "monto", "monto_contratado", "pagado", "costo_estimado",
+                      "avance", "presupuesto", "cantidad", "anticipo"}
+
+
 def consultar(sql: str, params: tuple = ()) -> pd.DataFrame:
     conn = get_conn()
     try:
-        return pd.read_sql_query(sql, conn, params=params)
+        df = pd.read_sql_query(sql, conn, params=params)
     finally:
         conn.close()
+    # Asegurar que las columnas de dinero/cantidad sean numéricas (los datos que vienen
+    # de Google Sheets pueden llegar como texto y romper las sumas/gráficas).
+    for c in df.columns:
+        if c in COLUMNAS_NUMERICAS:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return df
 
 
 def crear_tablas() -> None:
