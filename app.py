@@ -1543,11 +1543,13 @@ def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
     compras = consultar(f"SELECT * FROM compras WHERE obra_id=? AND {cond} "
                         f"ORDER BY fecha DESC, id DESC", (obra_id,))
     if not compras.empty:
+        importes = pd.to_numeric(compras["importe"], errors="coerce").fillna(0)
+        fechas = compras["fecha"].astype(str).str[:10]
         c1, c2, c3 = st.columns(3)
         c1.metric("Gastos registrados" if es_gasto else "Compras registradas", len(compras))
         c2.metric("Total gastado" if es_gasto else "Total comprado",
-                  f"{pesos(compras['importe'].sum())}")
-        hoy_total = compras[compras["fecha"] == HOY.isoformat()]["importe"].sum()
+                  f"{pesos(importes.sum())}")
+        hoy_total = importes[fechas == HOY.isoformat()].sum()
         c3.metric("Gastado hoy" if es_gasto else "Comprado hoy", f"{pesos(hoy_total)}")
         st.plotly_chart(grafica_compras_categoria(compras), width="stretch", key=f"plt_6{suf}")
 
@@ -3191,6 +3193,8 @@ def vista_reportes(obra_id: int):
 # 10) PRINCIPAL
 # =============================================================================
 def main():
+    global HOY
+    HOY = ahora_mx().date()
     inyectar_estilos()
     inicializar_bd()
     st.sidebar.markdown("<p class='marca-titulo'>🏗️ Constructor PRO</p>"
