@@ -82,6 +82,17 @@ def mayus(s):
     return s.strip().upper() if isinstance(s, str) else s
 
 
+def semana_de(fecha_str):
+    """Devuelve el rango de la semana (lunes a domingo) de una fecha 'YYYY-MM-DD...'."""
+    try:
+        f = datetime.strptime(str(fecha_str)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return "—"
+    ini = f - timedelta(days=f.weekday())
+    fin = ini + timedelta(days=6)
+    return f"{ini.strftime('%d/%m')} al {fin.strftime('%d/%m/%Y')}"
+
+
 # =============================================================================
 # 0) TEMA CLARO AUTOMÁTICO
 # =============================================================================
@@ -285,6 +296,10 @@ def crear_tablas() -> None:
         pass
     try:
         conn.execute("ALTER TABLE compras ADD COLUMN hora TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE compras ADD COLUMN tipo TEXT DEFAULT 'compra'")
     except Exception:
         pass
     for col in ["banco", "beneficiario"]:
@@ -839,12 +854,12 @@ def pdf_compra(compra_id: int) -> bytes:
     return bytes(pdf.output())
 
 
-def pdf_compras_lista(obra_id: int, ids: list, solicitante: str) -> bytes:
-    """Documento imprimible de las compras a realizar (con fecha, hora y solicitante)."""
+def pdf_compras_lista(obra_id: int, ids: list, solicitante: str, titulo: str = "Compras a realizar") -> bytes:
+    """Documento imprimible de las compras/gastos a realizar (con fecha, hora y solicitante)."""
     o = consultar("SELECT nombre,ubicacion FROM obras WHERE id=?", (obra_id,))
     on = o["nombre"].iloc[0] if not o.empty else ""
     ahora = ahora_mx()
-    pdf = _pdf_base("Compras a realizar", subtitulo=on)
+    pdf = _pdf_base(titulo, subtitulo=on)
     _pdf_kv(pdf, [("Fecha", ahora.strftime("%d/%m/%Y")),
                   ("Hora", ahora.strftime("%H:%M")),
                   ("Solicita la compra", solicitante or "")])
@@ -1312,15 +1327,20 @@ def comprobante_compra_html(compra_id: int) -> str:
     </body></html>"""
 
 
-def vista_compras(obra_id: int, rol: str, usuario: str):
-    st.subheader("🛒 Compras y gastos diarios")
+def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
+    es_gasto = (modo == "gasto")
+    suf = "_g" if es_gasto else ""
+    noun = "gasto" if es_gasto else "compra"
+    nounp = "gastos" if es_gasto else "compras"
+    st.subheader("🧾 Gastos" if es_gasto else "🛒 Compras y gastos diarios")
     if not requiere_obra(obra_id):
         return
     if puede(rol, "todas_obras"):
         obra_id = selector_obra_trabajo(obra_id, rol,
-                                        "🏢 Obra a la que se cargará la compra", "compras_obra_sel")
+                                        f"🏢 Obra a la que se cargará el {noun}",
+                                        f"compras_obra_sel{suf}")
     obra_nombre = consultar("SELECT nombre FROM obras WHERE id=?", (obra_id,))["nombre"].iloc[0]
-    st.caption(f"Las compras se cargarán a la obra: **{obra_nombre}**")
+    st.caption(f"Los {nounp} se cargarán a la obra: **{obra_nombre}**")
 
     proveedores = obtener_proveedores()
     prov_labels, prov_map = opciones_clave(proveedores) if not proveedores.empty else ([], {})
@@ -1330,20 +1350,22 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
         compradores = asign["nombre"].tolist()
     else:
         compradores = []
-    compras = consultar("SELECT * FROM compras WHERE obra_id=? ORDER BY fecha DESC, id DESC",
-                        (obra_id,))
+    cond = "tipo='gasto'" if es_gasto else "(tipo IS NULL OR tipo='compra')"
+    compras = consultar(f"SELECT * FROM compras WHERE obra_id=? AND {cond} "
+                        f"ORDER BY fecha DESC, id DESC", (obra_id,))
     if not compras.empty:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Compras registradas", len(compras))
-        c2.metric("Total comprado", f"{pesos(compras['importe'].sum())}")
+        c1.metric("Gastos registrados" if es_gasto else "Compras registradas", len(compras))
+        c2.metric("Total gastado" if es_gasto else "Total comprado",
+                  f"{pesos(compras['importe'].sum())}")
         hoy_total = compras[compras["fecha"] == HOY.isoformat()]["importe"].sum()
-        c3.metric("Comprado hoy", f"{pesos(hoy_total)}")
-        st.plotly_chart(grafica_compras_categoria(compras), width="stretch", key="plt_6")
+        c3.metric("Gastado hoy" if es_gasto else "Comprado hoy", f"{pesos(hoy_total)}")
+        st.plotly_chart(grafica_compras_categoria(compras), width="stretch", key=f"plt_6{suf}")
 
     if puede(rol, "editar"):
         # Alta rápida de proveedor (fuera del formulario para refrescar el listado)
         with st.expander("➕ Registrar un proveedor nuevo"):
-            with st.form("form_prov_rapido", clear_on_submit=True):
+            with st.form(f"form_prov_rapido{suf}", clear_on_submit=True):
                 col1, col2 = st.columns(2)
                 with col1:
                     p_codigo = st.text_input("Clave del proveedor")
@@ -1358,24 +1380,25 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                 if st.form_submit_button("💾 Guardar proveedor") and p_nombre.strip():
                     ejecutar("INSERT INTO proveedores(codigo,nombre,agente,telefono,correo,cuenta,"
                              "clabe,tarjeta) VALUES(?,?,?,?,?,?,?,?)",
-                             (p_codigo.strip(), p_nombre.strip(), p_agente, p_tel, p_correo,
-                              p_cuenta, p_clabe, p_tarjeta))
-                    st.success(f"Proveedor «{p_nombre}» guardado."); st.rerun()
+                             (mayus(p_codigo), mayus(p_nombre), mayus(p_agente), p_tel.strip(),
+                              p_correo.strip(), p_cuenta.strip(), p_clabe.strip(), p_tarjeta.strip()))
+                    st.success(f"Proveedor «{mayus(p_nombre)}» guardado."); st.rerun()
 
-        partidas_pres = consultar("SELECT partida, concepto FROM presupuesto WHERE obra_id=? "
-                                  "ORDER BY partida", (obra_id,))
         opciones_desc = []
-        for _, rp in partidas_pres.iterrows():
-            etq = str(rp["partida"] or "").strip()
-            if rp["concepto"]:
-                etq = f"{etq} · {rp['concepto']}" if etq else str(rp["concepto"])
-            if etq:
-                opciones_desc.append(etq)
-        st.markdown("#### ➕ Registrar una compra")
-        with st.form("form_compra", clear_on_submit=True):
+        if not es_gasto:
+            partidas_pres = consultar("SELECT partida, concepto FROM presupuesto WHERE obra_id=? "
+                                      "ORDER BY partida", (obra_id,))
+            for _, rp in partidas_pres.iterrows():
+                etq = str(rp["partida"] or "").strip()
+                if rp["concepto"]:
+                    etq = f"{etq} · {rp['concepto']}" if etq else str(rp["concepto"])
+                if etq:
+                    opciones_desc.append(etq)
+        st.markdown(f"#### ➕ Registrar un {noun}")
+        with st.form(f"form_compra{suf}", clear_on_submit=True):
             col1, col2, col3 = st.columns(3)
             with col1:
-                fecha = st.date_input("Fecha de la compra", HOY)
+                fecha = st.date_input(f"Fecha del {noun}", HOY)
                 categoria = st.selectbox("Categoría del gasto", CATEGORIAS_COMPRA)
             with col2:
                 if opciones_desc:
@@ -1393,9 +1416,9 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
             with col3:
                 importe = st.number_input("Importe ($ MXN)", min_value=0.0, step=10.0, format="%.2f")
                 if compradores:
-                    comprador = st.selectbox("Quién realiza la compra", compradores)
+                    comprador = st.selectbox(f"Quién realiza el {noun}", compradores)
                 else:
-                    comprador = st.text_input("Quién realiza la compra", value=usuario)
+                    comprador = st.text_input(f"Quién realiza el {noun}", value=usuario)
                 metodo_pago = st.selectbox("Método de pago", METODOS_PAGO)
             colA, colB = st.columns(2)
             with colA:
@@ -1404,28 +1427,28 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
             with colB:
                 factura = st.file_uploader("Factura (PDF o XML)",
                                            type=["pdf", "xml", "png", "jpg", "jpeg"])
-            enviar = st.form_submit_button("💾 Guardar compra")
+            enviar = st.form_submit_button(f"💾 Guardar {noun}")
         descripcion = desc_otro.strip() if desc_otro.strip() else (
             desc_part if desc_part != "(elegir partida)" else "")
         if enviar and descripcion.strip():
             nom_comp = guardar_adjunto(comprobante, "comp")
             nom_fact = guardar_adjunto(factura, "fact")
             ejecutar("INSERT INTO compras(obra_id,fecha,categoria,descripcion,importe,"
-                     "proveedor,comprador,comprobante,factura,metodo_pago,hora) "
-                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     "proveedor,comprador,comprobante,factura,metodo_pago,hora,tipo) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                      (obra_id, fecha.isoformat(), categoria, mayus(descripcion), importe,
                       proveedor, mayus(comprador), nom_comp, nom_fact, metodo_pago,
-                      ahora_mx().strftime("%H:%M")))
-            st.success("Compra registrada y cargada a la obra.")
+                      ahora_mx().strftime("%H:%M"), modo))
+            st.success(f"{noun.capitalize()} registrado y cargado a la obra.")
             st.rerun()
         elif enviar:
-            st.warning("Elige una partida del presupuesto o escribe la descripción de la compra.")
+            st.warning(f"Escribe la descripción / concepto del {noun}.")
     else:
         st.info("Tu rol (Cliente) es de solo lectura.")
 
-    st.markdown("#### Historial de compras")
+    st.markdown(f"#### Historial de {nounp}")
     if compras.empty:
-        st.caption("Aún no hay compras registradas para esta obra.")
+        st.caption(f"Aún no hay {nounp} registrados para esta obra.")
         return
     cols_hist = ["fecha", "categoria", "descripcion", "proveedor", "comprador", "metodo_pago",
                  "importe"]
@@ -1438,27 +1461,28 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                  "importe": "Importe"}),
                  width="stretch", hide_index=True)
 
-    # ---- Imprimir la o las compras a realizar ----
-    st.markdown("#### 🖨️ Imprimir compras a realizar")
-    st.caption("Selecciona una o varias compras; el documento incluye fecha, hora y quién solicita.")
+    # ---- Imprimir la o las compras/gastos a realizar ----
+    st.markdown(f"#### 🖨️ Imprimir {nounp} a realizar")
+    st.caption(f"Selecciona uno o varios {nounp}; el documento incluye fecha, hora y quién solicita.")
     opciones_imp = {
         f"{r['fecha']} · {r['descripcion']} · {pesos(r['importe'])}": int(r["id"])
         for _, r in compras.iterrows()}
-    sel_imp = st.multiselect("Compras a imprimir", list(opciones_imp.keys()),
-                             default=list(opciones_imp.keys()), key="imp_compras_sel")
+    sel_imp = st.multiselect(f"{nounp.capitalize()} a imprimir", list(opciones_imp.keys()),
+                             default=list(opciones_imp.keys()), key=f"imp_compras_sel{suf}")
     ids_imp = [opciones_imp[s] for s in sel_imp]
+    titulo_doc = "Gastos a realizar" if es_gasto else "Compras a realizar"
     if FPDF_OK:
         if ids_imp:
-            st.download_button("📄 Descargar documento de compras (PDF)",
-                               data=pdf_compras_lista(obra_id, ids_imp, usuario),
-                               file_name=f"Compras_a_realizar_{HOY.isoformat()}.pdf",
-                               mime="application/pdf", key="dl_compras_lista")
+            st.download_button(f"📄 Descargar documento de {nounp} (PDF)",
+                               data=pdf_compras_lista(obra_id, ids_imp, usuario, titulo_doc),
+                               file_name=f"{titulo_doc.replace(' ', '_')}_{HOY.isoformat()}.pdf",
+                               mime="application/pdf", key=f"dl_compras_lista{suf}")
         else:
-            st.caption("Selecciona al menos una compra para generar el documento.")
+            st.caption(f"Selecciona al menos un {noun} para generar el documento.")
     else:
         st.caption("Para el PDF instala una vez: python -m pip install fpdf2")
 
-    st.markdown("#### Comprobante PDF, adjuntos y factura por compra")
+    st.markdown(f"#### Comprobante PDF, adjuntos y factura por {noun}")
     con_adjuntos = compras[compras.apply(
         lambda c: _adjunto_existe(c["comprobante"]) or _adjunto_existe(c["factura"]), axis=1)]
     if con_adjuntos.empty:
@@ -1491,6 +1515,10 @@ def vista_compras(obra_id: int, rol: str, usuario: str):
                 boton_descarga_adjunto(c["factura"], "🧾 Factura", f"fact_{c['id']}")
         st.markdown("<hr style='margin:4px 0;border:none;border-top:1px solid #E6E2DA;'>",
                     unsafe_allow_html=True)
+
+
+def vista_gastos(obra_id: int, rol: str, usuario: str):
+    vista_compras(obra_id, rol, usuario, modo="gasto")
 
 
 def vista_crm(rol: str):
@@ -2550,12 +2578,22 @@ def vista_destajos(obra_id: int, rol: str):
                                 "FROM pagos_destajo WHERE obra_id=? AND contratista=? "
                                 "ORDER BY fecha DESC", (obra_id, nom))
                 if not log.empty:
-                    st.markdown("**Pagos realizados:**")
+                    st.markdown("**Pagos realizados (detalle por semana):**")
                     lg = log.copy()
+                    lg.insert(0, "semana", lg["fecha"].map(semana_de))
                     lg["monto"] = lg["monto"].map(lambda x: f"{pesos(x)}")
-                    st.dataframe(lg.rename(columns={"fecha": "Fecha y hora", "concepto": "Concepto",
-                                 "monto": "Monto", "metodo_pago": "Método",
+                    st.dataframe(lg.rename(columns={"semana": "Semana", "fecha": "Fecha y hora",
+                                 "concepto": "Concepto", "monto": "Monto",
+                                 "metodo_pago": "Método",
                                  "banco_beneficiario": "Banco / Beneficiario"}),
+                                 width="stretch", hide_index=True)
+                    # Subtotal por semana
+                    res = log.copy()
+                    res["Semana"] = res["fecha"].map(semana_de)
+                    sem = res.groupby("Semana", sort=False)["monto"].sum().reset_index()
+                    sem["monto"] = sem["monto"].map(lambda x: f"{pesos(x)}")
+                    st.markdown("**Total pagado por semana:**")
+                    st.dataframe(sem.rename(columns={"monto": "Pagado en la semana"}),
                                  width="stretch", hide_index=True)
                     st.write(f"**Total pagado a {nom}:** {pesos(log['monto'].sum())}")
                 else:
@@ -2940,16 +2978,16 @@ def main():
     # Menú según el rol: el Administrador ve todo; los demás (residentes), solo lo permitido
     if puede(rol, "admin"):
         secciones = ["Dashboard", "Usuarios", "CRM", "Obras", "Proveedores", "Contratistas",
-                     "Compras", "Presupuesto", "Control Financiero", "Requisiciones", "Destajos",
-                     "Avances y Bitácora", "Editar / Borrar", "Reportes", "Respaldo",
+                     "Compras", "Gastos", "Presupuesto", "Control Financiero", "Requisiciones",
+                     "Destajos", "Avances y Bitácora", "Editar / Borrar", "Reportes", "Respaldo",
                      "Google Sheets"]
     elif rol == "Departamento de Control":
-        secciones = ["Dashboard", "Proveedores", "Contratistas", "Compras", "Presupuesto",
+        secciones = ["Dashboard", "Proveedores", "Contratistas", "Compras", "Gastos", "Presupuesto",
                      "Control Financiero", "Requisiciones", "Destajos", "Avances y Bitácora",
                      "Reportes"]
     elif rol == "Ingeniero de Obra":
-        secciones = ["Proveedores", "Contratistas", "Compras", "Presupuesto", "Requisiciones",
-                     "Destajos", "Avances y Bitácora", "Reportes"]
+        secciones = ["Proveedores", "Contratistas", "Compras", "Gastos", "Presupuesto",
+                     "Requisiciones", "Destajos", "Avances y Bitácora", "Reportes"]
     else:
         secciones = ["Proveedores", "Contratistas", "Presupuesto", "Requisiciones",
                      "Destajos", "Avances y Bitácora", "Reportes"]
@@ -2974,6 +3012,8 @@ def main():
         vista_contratistas(rol)
     elif seccion == "Compras":
         vista_compras(obra_id, rol, usuario)
+    elif seccion == "Gastos":
+        vista_gastos(obra_id, rol, usuario)
     elif seccion == "Presupuesto":
         vista_presupuesto(obra_id, rol)
     elif seccion == "Control Financiero":
