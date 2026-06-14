@@ -1198,6 +1198,61 @@ def grafica_presupuesto_partidas(df):
 # =============================================================================
 # 8) VISTAS
 # =============================================================================
+def pdf_destajos_desglose(obra_id: int) -> bytes:
+    """Reporte de destajos desglosados: cada partida con sus anticipos detallados."""
+    o = consultar("SELECT nombre,codigo,ubicacion FROM obras WHERE id=?", (obra_id,))
+    on = o["nombre"].iloc[0] if not o.empty else ""
+    ou = o["ubicacion"].iloc[0] if not o.empty and "ubicacion" in o.columns else ""
+    cod = ""
+    if not o.empty and "codigo" in o.columns and pd.notna(o["codigo"].iloc[0]):
+        cod = str(o["codigo"].iloc[0])
+    dest = consultar("SELECT * FROM destajos WHERE obra_id=? ORDER BY contratista, concepto",
+                     (obra_id,))
+    pdf = _pdf_base("Reporte de destajos desglosados", subtitulo=f"{on}")
+    _pdf_kv(pdf, [("Obra", f"{cod + ' - ' if cod else ''}{on}"),
+                  ("Ubicacion", ou or "-"), ("Fecha", HOY.isoformat())])
+    if dest.empty:
+        _pdf_parrafo(pdf, "No hay destajos registrados en esta obra.")
+        return bytes(pdf.output())
+
+    tot_c = tot_p = 0.0
+    for _, r in dest.iterrows():
+        did = int(r["id"])
+        cap = float(r["monto_contratado"] or 0)
+        pag = float(r["pagado"] or 0)
+        saldo = cap - pag
+        tot_c += cap
+        tot_p += pag
+        _pdf_titulo(pdf, f"{r['contratista']}  -  {r['concepto'] if r['concepto'] else '(sin concepto)'}")
+        _pdf_kv(pdf, [("Contratado", f"{pesos(cap)} MXN"),
+                      ("Pagado", f"{pesos(pag)} MXN"),
+                      ("Saldo", f"{pesos(saldo)} MXN"),
+                      ("Avance", f"{int(r['avance'] or 0)}%"),
+                      ("Estatus", r["estatus"] or "-")])
+        pagos = consultar("SELECT fecha,monto,metodo_pago,banco_beneficiario FROM pagos_destajo "
+                          "WHERE destajo_id=? ORDER BY fecha ASC, id ASC", (did,))
+        if not pagos.empty:
+            filas = []
+            for i, (_, p) in enumerate(pagos.iterrows(), start=1):
+                filas.append([f"Anticipo {i}", semana_de(p["fecha"]), str(p["fecha"]),
+                              str(p["metodo_pago"] or "-"), f"{pesos(p['monto'])}"])
+            _pdf_tabla(pdf, ["Anticipo", "Semana", "Fecha y hora", "Metodo", "Monto"],
+                       filas, [24, 40, 42, 38, 36])
+        else:
+            _pdf_parrafo(pdf, "Sin anticipos registrados individualmente.", size=9,
+                         color=(122, 118, 110))
+        pdf.ln(2)
+
+    _pdf_titulo(pdf, "Totales de la obra")
+    _pdf_kv(pdf, [("Total contratado", f"{pesos(tot_c)} MXN"),
+                  ("Total pagado", f"{pesos(tot_p)} MXN"),
+                  ("Saldo total", f"{pesos(tot_c - tot_p)} MXN")])
+    pdf.ln(2)
+    _pdf_parrafo(pdf, f"Generado por {EMPRESA} - {HOY.isoformat()}", size=9,
+                 color=(122, 118, 110))
+    return bytes(pdf.output())
+
+
 def pdf_pagos_semana(obra_id: int) -> bytes:
     """Reporte semanal: suma de todos los destajos por pagar de la obra."""
     o = consultar("SELECT nombre,codigo FROM obras WHERE id=?", (obra_id,))
@@ -2482,6 +2537,10 @@ def vista_destajos(obra_id: int, rol: str):
                                data=pdf_pagos_semana(obra_id),
                                file_name=f"Pagos_semana_{HOY.isoformat()}.pdf",
                                mime="application/pdf", key="pdf_pagos_sem")
+            st.download_button("📑 Descargar reporte de destajos desglosados (PDF)",
+                               data=pdf_destajos_desglose(obra_id),
+                               file_name=f"Destajos_desglosados_{HOY.isoformat()}.pdf",
+                               mime="application/pdf", key="pdf_dest_desglose")
             resumen_p = (f"Reporte semanal de pagos a destajos\n"
                          f"Obra activa - {EMPRESA} - {HOY.isoformat()}")
             bloque_enviar_reporte(pdf_pagos_semana(obra_id), "Reporte semanal de pagos",
