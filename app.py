@@ -1156,11 +1156,20 @@ def calcular_kpis(obra_id: int) -> dict:
     avance = round(etapas["avance"].mean(), 1) if not etapas.empty else 0.0
     ejercido = consultar("SELECT COALESCE(SUM(importe),0) AS s FROM compras WHERE obra_id=?",
                          (obra_id,))["s"].iloc[0]
+    compras_solo = consultar("SELECT COALESCE(SUM(importe),0) AS s FROM compras WHERE obra_id=? "
+                             "AND (tipo IS NULL OR tipo='compra')", (obra_id,))["s"].iloc[0]
+    gastos_solo = consultar("SELECT COALESCE(SUM(importe),0) AS s FROM compras WHERE obra_id=? "
+                            "AND tipo='gasto'", (obra_id,))["s"].iloc[0]
+    destajos_pag = consultar("SELECT COALESCE(SUM(pagado),0) AS s FROM destajos WHERE obra_id=?",
+                             (obra_id,))["s"].iloc[0]
+    egresos = float(ejercido) + float(destajos_pag)
     presupuesto = float(obra["presupuesto"]) if obra["presupuesto"] else 0.0
     pct = round(ejercido / presupuesto * 100, 1) if presupuesto else 0
     fin = datetime.strptime(obra["fecha_fin"], "%Y-%m-%d").date() if obra["fecha_fin"] else HOY
     dias = (fin - HOY).days
     return {"avance": avance, "presupuesto": presupuesto, "ejercido": float(ejercido),
+            "compras": float(compras_solo), "gastos": float(gastos_solo),
+            "destajos": float(destajos_pag), "egresos": egresos,
             "pct": pct, "dias": dias, "obra": obra}
 
 
@@ -1358,23 +1367,24 @@ def vista_dashboard(obra_id: int):
     cliente = obtener_obras().set_index("id").loc[obra_id, "cliente"]
     st.subheader("📊 Panel general")
     st.caption(f"Cliente: {cliente}  ·  Ubicación: {o['ubicacion']}  ·  Responsable: {o['ingeniero']}")
+    recibido = total_abonos(obra_id)
+    pres = k["presupuesto"]
+    egresos = k["egresos"]
+    balance = recibido - egresos
+    saldo_cobrar = pres - recibido
+    pct_cobrado = round(recibido / pres * 100, 1) if pres else 0
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("% Avance general", f"{k['avance']}%")
-    c2.metric("Presupuesto", f"{pesos(k['presupuesto'])}")
-    c3.metric("Ejercido (compras)", f"{pesos(k['ejercido'])}", f"{k['pct']}% del total")
+    c1.metric("% Cobrado (abonos / presupuesto)", f"{pct_cobrado}%")
+    c2.metric("Presupuesto", f"{pesos(pres)}")
+    c3.metric("Recibido (abonos)", f"{pesos(recibido)}")
     c4.metric("Días restantes", f"{k['dias']} días", "Vencida" if k["dias"] < 0 else "En tiempo")
 
-    # Resumen del Control Financiero
-    recibido = total_abonos(obra_id)
-    pagado_dest = consultar("SELECT COALESCE(SUM(pagado),0) p FROM destajos WHERE obra_id=?",
-                            (obra_id,))["p"].iloc[0]
-    egresos = k["ejercido"] + float(pagado_dest or 0)
-    balance = recibido - egresos
     st.markdown("##### 💰 Control financiero")
     f1, f2, f3 = st.columns(3)
-    f1.metric("Recibido (abonos)", f"{pesos(recibido)}")
-    f2.metric("Egresos (compras + destajos)", f"{pesos(egresos)}")
-    f3.metric("Balance", f"{pesos(balance)}", "A favor" if balance >= 0 else "En contra")
+    f1.metric("Egresos (compras + gastos + destajos)", f"{pesos(egresos)}")
+    f2.metric("Balance", f"{pesos(balance)}", "A favor" if balance >= 0 else "En contra")
+    f3.metric("Saldo por cobrar", f"{pesos(saldo_cobrar)}")
     st.markdown("---")
     etapas = consultar("SELECT * FROM etapas WHERE obra_id=?", (obra_id,))
     destajos = consultar("SELECT * FROM destajos WHERE obra_id=?", (obra_id,))
@@ -2420,13 +2430,17 @@ def vista_control_financiero(obra_id: int, rol: str):
     abonos = consultar("SELECT * FROM abonos WHERE obra_id=? ORDER BY fecha DESC", (obra_id,))
     k = calcular_kpis(obra_id)
     recibido = total_abonos(obra_id)
-    egresos = k["ejercido"]
+    egresos = k["egresos"]
     balance = recibido - egresos
-    c1, c2, c3 = st.columns(3)
+    saldo_cobrar = k["presupuesto"] - recibido
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total recibido (abonos)", f"{pesos(recibido)}")
-    c2.metric("Egresos (compras)", f"{pesos(egresos)}")
+    c2.metric("Egresos (compras + gastos + destajos)", f"{pesos(egresos)}")
     c3.metric("Balance", f"{pesos(balance)}",
               "A favor" if balance >= 0 else "En contra")
+    c4.metric("Saldo por cobrar", f"{pesos(saldo_cobrar)}")
+    st.caption(f"Detalle de egresos — Compras: {pesos(k['compras'])} · "
+               f"Gastos: {pesos(k['gastos'])} · Destajos: {pesos(k['destajos'])}")
     if not abonos.empty:
         tabla = abonos[["fecha", "concepto", "metodo_pago", "monto", "nota"]].copy()
         tabla["monto"] = tabla["monto"].map(lambda x: f"{pesos(x)}")
