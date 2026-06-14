@@ -19,6 +19,7 @@
 # =============================================================================
 
 import os
+import re
 import shutil
 import sqlite3
 import hashlib
@@ -196,6 +197,42 @@ def ejecutar(sql: str, params: tuple = ()) -> None:
         conn.commit()
     finally:
         conn.close()
+    _marcar_cambio(sql)
+
+
+def _marcar_cambio(sql: str) -> None:
+    """Marca la tabla modificada para el autoguardado en la nube (solo con sesión activa)."""
+    try:
+        if not st.session_state.get("auth"):
+            return
+        m = re.match(r"\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([A-Za-z_]+)", sql, re.I)
+        if not m:
+            return
+        t = m.group(1).lower()
+        if t in TABLAS_SYNC:
+            st.session_state.setdefault("_tablas_cambiadas", set()).add(t)
+    except Exception:
+        pass
+
+
+def sincronizar_tablas(tablas) -> int:
+    """Sube a Google Sheets solo las tablas indicadas (para el autoguardado)."""
+    sh = _abrir_spreadsheet()
+    n = 0
+    for t in tablas:
+        if t not in TABLAS_SYNC:
+            continue
+        df = consultar(f"SELECT * FROM {t}")
+        datos = [df.columns.tolist()] + df.astype(object).where(df.notna(), "").values.tolist()
+        try:
+            ws = sh.worksheet(t)
+            ws.clear()
+        except Exception:
+            ws = sh.add_worksheet(title=t, rows=max(20, len(df) + 5),
+                                  cols=max(5, len(df.columns) + 2))
+        ws.update(datos)
+        n += 1
+    return n
 
 
 def consultar(sql: str, params: tuple = ()) -> pd.DataFrame:
@@ -3034,6 +3071,7 @@ def main():
         except Exception:
             pass
         st.session_state["_pulled"] = True
+        st.session_state["_tablas_cambiadas"] = set()
 
     st.sidebar.markdown(f"<span class='chip'>{usuario} · {rol}</span>", unsafe_allow_html=True)
     if st.sidebar.button("Cerrar sesión"):
@@ -3121,6 +3159,19 @@ def main():
         vista_respaldo(rol)
     elif seccion == "Google Sheets":
         vista_sheets(rol)
+
+    # Autoguardado en la nube: si hubo cambios y la nube está configurada, sube solo
+    # las tablas modificadas (sin que el usuario tenga que presionar el botón).
+    cambios = st.session_state.get("_tablas_cambiadas")
+    if cambios and _cloud_ok and puede(rol, "editar"):
+        try:
+            with st.spinner("Guardando en la nube..."):
+                sincronizar_tablas(list(cambios))
+            st.session_state["_tablas_cambiadas"] = set()
+            st.sidebar.success("☁️ Cambios guardados en la nube automáticamente.")
+        except Exception:
+            st.sidebar.warning("No se pudo autoguardar. Usa «☁️ Guardar en la nube» cuando "
+                               "tengas conexión.")
 
     st.sidebar.markdown("---")
     st.sidebar.caption("v5 · Usuarios y claves · Datos en cob_data.db")
