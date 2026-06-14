@@ -242,10 +242,15 @@ def consultar(sql: str, params: tuple = ()) -> pd.DataFrame:
     finally:
         conn.close()
     # Asegurar que las columnas de dinero/cantidad sean numéricas (los datos que vienen
-    # de Google Sheets pueden llegar como texto y romper las sumas/gráficas).
+    # de Google Sheets o de importaciones pueden llegar como texto con comas, "$" o
+    # apóstrofes, p. ej. "1,234.56" o "$ 1'700,000.00", y romperían las sumas/gráficas).
     for c in df.columns:
         if c in COLUMNAS_NUMERICAS:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+            if pd.api.types.is_numeric_dtype(df[c]):
+                df[c] = df[c].fillna(0)
+            else:
+                limpio = df[c].astype(str).str.replace(r"[^\d.\-]", "", regex=True)
+                df[c] = pd.to_numeric(limpio, errors="coerce").fillna(0)
     return df
 
 
