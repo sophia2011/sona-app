@@ -59,7 +59,8 @@ EMPRESA = "SONA CONSTRUCTORES DEL MAYAB"
 LOGO_PATH = os.path.join(BASE_DIR, "logo_sona.png")  # logo para los reportes (opcional)
 GCP_JSON = os.path.join(BASE_DIR, ".gcp_service_account.json")  # credenciales Google (opcional)
 TABLAS_SYNC = ["clientes", "obras", "etapas", "compras", "requisiciones", "destajos",
-               "bitacora", "contratistas", "presupuesto", "proveedores", "usuarios", "abonos"]
+               "bitacora", "contratistas", "presupuesto", "proveedores", "usuarios", "abonos",
+               "pagos_destajo"]
 
 
 def pesos(valor) -> str:
@@ -250,6 +251,11 @@ def crear_tablas() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             obra_id INTEGER, fecha TEXT, concepto TEXT, monto REAL,
             metodo_pago TEXT, nota TEXT);
+        CREATE TABLE IF NOT EXISTS pagos_destajo(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            destajo_id INTEGER, obra_id INTEGER, contratista TEXT, concepto TEXT,
+            fecha TEXT, monto REAL, metodo_pago TEXT, datos_bancarios TEXT,
+            banco_beneficiario TEXT);
     """)
     # Migración: agrega la columna 'codigo' (clave de identificación) si falta
     for tabla in ["obras", "contratistas", "proveedores", "usuarios"]:
@@ -2509,12 +2515,71 @@ def vista_destajos(obra_id: int, rol: str):
                 datos_banc = st.text_input("No. tarjeta / CLABE interbancaria / No. cuenta")
                 banco_benef = st.text_input("Banco y nombre del beneficiario")
             if st.form_submit_button("💾 Aplicar pago"):
-                actual = consultar("SELECT pagado FROM destajos WHERE id=?", (did,))["pagado"].iloc[0]
+                drow = consultar("SELECT contratista,concepto,pagado FROM destajos WHERE id=?",
+                                 (did,)).iloc[0]
+                actual = float(drow["pagado"] or 0)
                 ejecutar("UPDATE destajos SET pagado=?, metodo_pago=?, datos_bancarios=?, "
                          "banco_beneficiario=? WHERE id=?",
-                         (float(actual) + abono, metodo_d, mayus(datos_banc),
+                         (actual + abono, metodo_d, mayus(datos_banc),
                           mayus(banco_benef), did))
+                ejecutar("INSERT INTO pagos_destajo(destajo_id,obra_id,contratista,concepto,fecha,"
+                         "monto,metodo_pago,datos_bancarios,banco_beneficiario) "
+                         "VALUES(?,?,?,?,?,?,?,?,?)",
+                         (did, obra_id, drow["contratista"], drow["concepto"],
+                          ahora_mx().strftime("%Y-%m-%d %H:%M"), abono, metodo_d,
+                          mayus(datos_banc), mayus(banco_benef)))
                 st.success(f"Pago de {pesos(abono)} aplicado."); st.rerun()
+
+    # ----- Pagos por contratista (ventana desplegable) -----
+    if not dest.empty:
+        st.markdown("#### 💰 Pagos por contratista")
+        st.caption("Abre cada contratista para ver sus partidas y los pagos realizados.")
+        for nom in sorted([str(x) for x in dest["contratista"].unique()]):
+            ddf = dest[dest["contratista"] == nom]
+            tot_contr = float(ddf["monto_contratado"].sum())
+            tot_pag = float(ddf["pagado"].sum())
+            with st.expander(f"{nom}  —  Pagado {pesos(tot_pag)} de {pesos(tot_contr)}"):
+                tp = ddf[["concepto", "monto_contratado", "pagado"]].copy()
+                tp["saldo"] = tp["monto_contratado"] - tp["pagado"]
+                for c in ["monto_contratado", "pagado", "saldo"]:
+                    tp[c] = tp[c].map(lambda x: f"{pesos(x)}")
+                st.dataframe(tp.rename(columns={"concepto": "Concepto",
+                             "monto_contratado": "Contratado", "pagado": "Pagado",
+                             "saldo": "Saldo"}), width="stretch", hide_index=True)
+                log = consultar("SELECT fecha,concepto,monto,metodo_pago,banco_beneficiario "
+                                "FROM pagos_destajo WHERE obra_id=? AND contratista=? "
+                                "ORDER BY fecha DESC", (obra_id, nom))
+                if not log.empty:
+                    st.markdown("**Pagos realizados:**")
+                    lg = log.copy()
+                    lg["monto"] = lg["monto"].map(lambda x: f"{pesos(x)}")
+                    st.dataframe(lg.rename(columns={"fecha": "Fecha y hora", "concepto": "Concepto",
+                                 "monto": "Monto", "metodo_pago": "Método",
+                                 "banco_beneficiario": "Banco / Beneficiario"}),
+                                 width="stretch", hide_index=True)
+                    st.write(f"**Total pagado a {nom}:** {pesos(log['monto'].sum())}")
+                else:
+                    st.caption("Sin pagos individuales registrados todavía (solo el acumulado de arriba).")
+
+    # ----- Borrar un destajo (solo Administrador) -----
+    if not dest.empty and puede(rol, "admin"):
+        st.markdown("---")
+        st.markdown("#### 🗑️ Borrar un destajo (solo Administrador)")
+        st.caption("Úsalo para eliminar destajos duplicados o capturados por error.")
+        opd = [(f"{i+1}. {r['contratista']} · {r['concepto'] if r['concepto'] else '(sin concepto)'}"
+                f" · Pagado {pesos(r['pagado'])}", int(r["id"]))
+               for i, (_, r) in enumerate(dest.iterrows())]
+        et_del = [e for e, _ in opd]
+        sel_del = st.selectbox("Destajo a borrar", et_del, key="del_dest_sel")
+        did_del = dict(opd)[sel_del]
+        clave_del = st.text_input("Clave del Administrador", type="password", key="del_dest_clave")
+        if st.button("Eliminar destajo seleccionado", key="del_dest_btn"):
+            if verificar_clave_admin(clave_del):
+                ejecutar("DELETE FROM destajos WHERE id=?", (did_del,))
+                ejecutar("DELETE FROM pagos_destajo WHERE destajo_id=?", (did_del,))
+                st.success("Destajo eliminado."); st.rerun()
+            else:
+                st.error("Clave del Administrador incorrecta. No se eliminó nada.")
 
 
 def vista_avances(obra_id: int, rol: str, usuario: str):
