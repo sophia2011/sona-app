@@ -348,7 +348,8 @@ def crear_tablas() -> None:
         conn.execute("ALTER TABLE requisiciones ADD COLUMN metodo_pago TEXT")
     except Exception:
         pass
-    for col, deff in [("avance", "REAL DEFAULT 0"), ("estado", "TEXT DEFAULT 'Por iniciar'")]:
+    for col, deff in [("avance", "REAL DEFAULT 0"), ("estado", "TEXT DEFAULT 'Por iniciar'"),
+                      ("fecha_inicio", "TEXT"), ("fecha_fin", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE presupuesto ADD COLUMN {col} {deff}")
         except Exception:
@@ -1231,6 +1232,53 @@ def grafica_avance_etapas(df):
     return _mate(fig, 360)
 
 
+def _etiqueta_partida(rp):
+    e = str(rp.get("partida") or "").strip()
+    if rp.get("concepto"):
+        e = f"{e} · {rp['concepto']}" if e else str(rp["concepto"])
+    return e or "Partida"
+
+
+def grafica_avance_partidas(df):
+    if df.empty:
+        return _mate(go.Figure().add_annotation(
+            text="Sin partidas (captúralas en Presupuesto)", showarrow=False), 300)
+    d = df.copy()
+    d["partida_lbl"] = d.apply(_etiqueta_partida, axis=1)
+    d["avance"] = d["avance"].fillna(0) if "avance" in d.columns else 0
+    fig = px.bar(d, x="avance", y="partida_lbl", orientation="h",
+                 title="% de avance por partida", text="avance",
+                 color_discrete_sequence=[COLOR_PRIMARIO])
+    fig.update_traces(texttemplate="%{text}%", textposition="outside")
+    fig.update_layout(xaxis_title="% avance", yaxis_title="", xaxis_range=[0, 110])
+    fig.update_yaxes(autorange="reversed")
+    return _mate(fig, 360)
+
+
+def grafica_gantt_partidas(df, obra):
+    if df.empty:
+        return _mate(go.Figure().add_annotation(
+            text="Sin partidas (captúralas en Presupuesto)", showarrow=False), 300)
+    d = df.copy()
+    d["partida_lbl"] = d.apply(_etiqueta_partida, axis=1)
+    obra_ini = obra["fecha_inicio"] if obra["fecha_inicio"] else HOY.isoformat()
+    obra_fin = obra["fecha_fin"] if obra["fecha_fin"] else HOY.isoformat()
+    ini = d["fecha_inicio"] if "fecha_inicio" in d.columns else pd.Series([None] * len(d))
+    fin = d["fecha_fin"] if "fecha_fin" in d.columns else pd.Series([None] * len(d))
+    d["inicio"] = pd.to_datetime(ini.fillna(obra_ini).replace("", obra_ini))
+    d["fin"] = pd.to_datetime(fin.fillna(obra_fin).replace("", obra_fin))
+    if "estado" not in d.columns:
+        d["estado"] = "Por iniciar"
+    d["estado"] = d["estado"].fillna("Por iniciar")
+    mapa = {"Completada": COLOR_OK, "En proceso": COLOR_PRIMARIO, "Por iniciar": COLOR_ACENTO}
+    fig = px.timeline(d, x_start="inicio", x_end="fin", y="partida_lbl", color="estado",
+                      color_discrete_map=mapa, hover_data={"avance": True},
+                      title="Cronograma de obra por partida (Gantt)")
+    fig.update_yaxes(autorange="reversed")
+    fig.add_vline(x=pd.Timestamp(HOY), line_width=2, line_dash="dash", line_color=COLOR_ALERTA)
+    return _mate(fig, 400)
+
+
 def grafica_destajos(df):
     if df.empty:
         return _mate(go.Figure().add_annotation(text="Sin destajos", showarrow=False), 300)
@@ -1395,13 +1443,14 @@ def vista_dashboard(obra_id: int):
     f2.metric("Balance", f"{pesos(balance)}", "A favor" if balance >= 0 else "En contra")
     f3.metric("Saldo por cobrar", f"{pesos(saldo_cobrar)}")
     st.markdown("---")
-    etapas = consultar("SELECT * FROM etapas WHERE obra_id=?", (obra_id,))
+    partidas = consultar("SELECT * FROM presupuesto WHERE obra_id=? ORDER BY partida, id",
+                         (obra_id,))
     destajos = consultar("SELECT * FROM destajos WHERE obra_id=?", (obra_id,))
     compras = consultar("SELECT * FROM compras WHERE obra_id=?", (obra_id,))
     g1, g2 = st.columns([1, 2])
     with g1: st.plotly_chart(grafica_gauge(k["avance"]), width="stretch", key="plt_1")
-    with g2: st.plotly_chart(grafica_avance_etapas(etapas), width="stretch", key="plt_2")
-    st.plotly_chart(grafica_gantt(etapas), width="stretch", key="plt_3")
+    with g2: st.plotly_chart(grafica_avance_partidas(partidas), width="stretch", key="plt_2")
+    st.plotly_chart(grafica_gantt_partidas(partidas, o), width="stretch", key="plt_3")
     g3, g4 = st.columns(2)
     with g3: st.plotly_chart(grafica_destajos(destajos), width="stretch", key="plt_4")
     with g4: st.plotly_chart(grafica_compras_categoria(compras), width="stretch", key="plt_5")
@@ -2817,9 +2866,28 @@ def vista_avances(obra_id: int, rol: str, usuario: str):
                 est_op = ["Por iniciar", "En proceso", "Completada"]
                 est_act = fila["estado"] if "estado" in pres.columns and fila["estado"] in est_op else "Por iniciar"
                 estado = st.selectbox("Estado", est_op, index=est_op.index(est_act))
+                obra_row = consultar("SELECT fecha_inicio,fecha_fin FROM obras WHERE id=?",
+                                     (obra_id,)).iloc[0]
+
+                def _fch(v, fb):
+                    try:
+                        return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+                    except Exception:
+                        try:
+                            return datetime.strptime(str(fb)[:10], "%Y-%m-%d").date()
+                        except Exception:
+                            return HOY
+                cci, ccf = st.columns(2)
+                with cci:
+                    f_ini = st.date_input("Fecha de inicio (para el cronograma)",
+                                          _fch(fila.get("fecha_inicio"), obra_row["fecha_inicio"]))
+                with ccf:
+                    f_fin = st.date_input("Fecha de término (para el cronograma)",
+                                          _fch(fila.get("fecha_fin"), obra_row["fecha_fin"]))
                 if st.form_submit_button("💾 Guardar avance"):
-                    ejecutar("UPDATE presupuesto SET avance=?, estado=? WHERE id=?",
-                             (nuevo, estado, pid))
+                    ejecutar("UPDATE presupuesto SET avance=?, estado=?, fecha_inicio=?, "
+                             "fecha_fin=? WHERE id=?",
+                             (nuevo, estado, f_ini.isoformat(), f_fin.isoformat(), pid))
                     st.success(f"Partida «{sel}» → {nuevo}%."); st.rerun()
             tabla_av = pres.copy()
             if "avance" in tabla_av.columns:
