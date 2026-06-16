@@ -209,24 +209,96 @@ def _marcar_cambio(sql: str) -> None:
         if not m:
             return
         t = m.group(1).lower()
-        if t in TABLAS_SYNC:
+        if t in TABLAS_SYNC or t in TABLAS_DOC:
             st.session_state.setdefault("_tablas_cambiadas", set()).add(t)
     except Exception:
         pass
 
 
+# Documentos grandes (PDF en base64) que se guardan partidos en varias filas de su hoja
+DOCS_SYNC = [("contratos", "obra_id"), ("contratos_contr", "contratista_id"),
+             ("presupuesto_doc", "obra_id")]
+TABLAS_DOC = {t for t, _ in DOCS_SYNC}
+CHUNK_DOC = 45000
+
+
+def _exportar_doc(sh, tabla, idcol):
+    df = consultar(f"SELECT {idcol}, nombre, contenido, fecha FROM {tabla}")
+    filas = [[idcol, "nombre", "fecha", "parte", "total", "contenido"]]
+    for _, r in df.iterrows():
+        cont = str(r["contenido"]) if r["contenido"] is not None else ""
+        partes = [cont[i:i + CHUNK_DOC] for i in range(0, len(cont), CHUNK_DOC)] or [""]
+        for i, p in enumerate(partes):
+            filas.append([r[idcol], r["nombre"], r["fecha"], i, len(partes), p])
+    try:
+        ws = sh.worksheet(tabla)
+        ws.clear()
+    except Exception:
+        ws = sh.add_worksheet(title=tabla, rows=max(20, len(filas) + 5), cols=6)
+    try:
+        ws.update(filas, value_input_option="RAW")
+    except Exception:
+        ws.update(filas)
+
+
+def _importar_doc(sh, tabla, idcol):
+    try:
+        ws = sh.worksheet(tabla)
+    except Exception:
+        return
+    vals = ws.get_all_values()
+    ejecutar(f"DELETE FROM {tabla}")
+    if not vals or len(vals) < 2:
+        return
+    pos = {h: i for i, h in enumerate(vals[0])}
+    if "contenido" not in pos or idcol not in pos:
+        return
+    from collections import defaultdict
+    partes, meta = defaultdict(list), {}
+
+    def cel(row, col):
+        i = pos.get(col, -1)
+        return row[i] if 0 <= i < len(row) else ""
+    for row in vals[1:]:
+        key = cel(row, idcol)
+        if key == "":
+            continue
+        try:
+            pidx = int(cel(row, "parte") or 0)
+        except Exception:
+            pidx = 0
+        partes[key].append((pidx, cel(row, "contenido")))
+        meta[key] = (cel(row, "nombre"), cel(row, "fecha"))
+    for key, lst in partes.items():
+        lst.sort(key=lambda x: x[0])
+        contenido = "".join(p for _, p in lst)
+        nombre, fecha = meta[key]
+        try:
+            kv = int(float(key))
+        except Exception:
+            kv = key
+        ejecutar(f"INSERT INTO {tabla}({idcol},nombre,contenido,fecha) VALUES(?,?,?,?)",
+                 (kv, nombre, contenido, fecha))
+
+
 def sincronizar_tablas(tablas) -> int:
     """Sube a Google Sheets solo las hojas afectadas (para el autoguardado)."""
     sh = _abrir_spreadsheet()
-    hojas = []
+    hojas, docs = [], []
+    docmap = dict(DOCS_SYNC)
     for t in tablas:
         if t == "compras":
             hojas += ["compras", "gastos"]
         elif t in HOJAS_SYNC:
             hojas.append(t)
+        elif t in docmap:
+            docs.append(t)
     n = 0
     for hoja in dict.fromkeys(hojas):
         _escribir_hoja(sh, hoja, df_para_hoja(hoja))
+        n += 1
+    for t in dict.fromkeys(docs):
+        _exportar_doc(sh, t, docmap[t])
         n += 1
     return n
 
@@ -577,6 +649,9 @@ def sincronizar_a_sheets() -> int:
     for hoja in HOJAS_SYNC:
         _escribir_hoja(sh, hoja, df_para_hoja(hoja))
         n += 1
+    for tabla, idcol in DOCS_SYNC:
+        _exportar_doc(sh, tabla, idcol)
+        n += 1
     return n
 
 
@@ -606,6 +681,8 @@ def traer_de_sheets() -> int:
             except Exception:
                 pass
         n += 1
+    for tabla, idcol in DOCS_SYNC:
+        _importar_doc(sh, tabla, idcol)
     return n
 
 
