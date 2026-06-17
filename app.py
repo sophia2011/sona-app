@@ -61,7 +61,7 @@ LOGO_PATH = os.path.join(BASE_DIR, "logo_sona.png")  # logo para los reportes (o
 GCP_JSON = os.path.join(BASE_DIR, ".gcp_service_account.json")  # credenciales Google (opcional)
 TABLAS_SYNC = ["clientes", "obras", "etapas", "compras", "requisiciones", "destajos",
                "bitacora", "contratistas", "presupuesto", "proveedores", "usuarios", "abonos",
-               "pagos_destajo"]
+               "pagos_destajo", "prog_pagos"]
 
 
 def pesos(valor) -> str:
@@ -136,6 +136,8 @@ ESTATUS_REQ = ["Solicitada", "Aprobada", "Comprada", "Entregada"]
 PRIORIDAD_REQ = ["Normal", "Urgente", "En espera"]
 METODOS_PAGO_REQ = ["Efectivo", "Transferencia", "Depósito", "Tarjeta de débito",
                     "Tarjeta de crédito"]
+PRIORIDAD_PAGO = ["Alta", "Media", "Baja"]
+ESTATUS_PAGO = ["Pendiente", "Pagado"]
 TIPO_CLIENTE = ["Prospecto", "Activo", "Cerrado"]
 METODOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta de débito", "Tarjeta de crédito"]
 
@@ -387,6 +389,11 @@ def crear_tablas() -> None:
             destajo_id INTEGER, obra_id INTEGER, contratista TEXT, concepto TEXT,
             fecha TEXT, monto REAL, metodo_pago TEXT, datos_bancarios TEXT,
             banco_beneficiario TEXT);
+        CREATE TABLE IF NOT EXISTS prog_pagos(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            obra_id INTEGER, destajo_id INTEGER, contratista TEXT, concepto TEXT,
+            semana TEXT, monto REAL, prioridad TEXT, estatus TEXT DEFAULT 'Pendiente',
+            fecha_pago TEXT, metodo_pago TEXT, datos_bancarios TEXT, banco_beneficiario TEXT);
     """)
     # Migración: agrega la columna 'codigo' (clave de identificación) si falta
     for tabla in ["obras", "contratistas", "proveedores", "usuarios"]:
@@ -616,8 +623,8 @@ def _abrir_spreadsheet():
 
 
 HOJAS_SYNC = ["clientes", "obras", "etapas", "compras", "gastos", "requisiciones", "destajos",
-              "pagos_destajo", "bitacora", "contratistas", "presupuesto", "proveedores",
-              "usuarios", "abonos"]
+              "pagos_destajo", "prog_pagos", "bitacora", "contratistas", "presupuesto",
+              "proveedores", "usuarios", "abonos"]
 
 
 def df_para_hoja(hoja: str):
@@ -2869,6 +2876,125 @@ def vista_destajos(obra_id: int, rol: str):
                 if excede:
                     msg += " (AUTORIZADO por el Administrador: rebasa lo contratado)"
                 st.success(msg); st.rerun()
+
+    # ----- Programación de pagos por semana -----
+    if puede(rol, "editar") and not dest.empty:
+        st.markdown("---")
+        st.markdown("#### 📅 Programación de pagos por semana")
+        st.caption("Programa los pagos por semana con su prioridad (Alta, Media o Baja). "
+                   "El pago se carga al destajo SOLO cuando lo marcas como PAGADO.")
+        opc_p = [(f"{i+1}. {r['contratista']} · {r['concepto']}", int(r["id"]))
+                 for i, (_, r) in enumerate(dest.iterrows())]
+        with st.form("form_prog_pago", clear_on_submit=True):
+            selp = st.selectbox("Destajo (contratista · concepto)", [e for e, _ in opc_p],
+                                key="prog_dest")
+            pid = dict(opc_p)[selp]
+            cpa, cpb, cpc = st.columns(3)
+            with cpa:
+                semana = st.date_input("Semana del pago", HOY, key="prog_semana")
+            with cpb:
+                monto_p = st.number_input("Monto a pagar ($ MXN)", min_value=0.0, step=1000.0,
+                                          format="%.2f", key="prog_monto")
+            with cpc:
+                prioridad = st.selectbox("Prioridad de pago", PRIORIDAD_PAGO, key="prog_prio")
+            if st.form_submit_button("📅 Programar pago") and monto_p > 0:
+                drow = dest[dest["id"] == pid].iloc[0]
+                ejecutar("INSERT INTO prog_pagos(obra_id,destajo_id,contratista,concepto,semana,"
+                         "monto,prioridad,estatus) VALUES(?,?,?,?,?,?,?,?)",
+                         (obra_id, pid, drow["contratista"], drow["concepto"],
+                          semana_de(semana.isoformat()), monto_p, prioridad, "Pendiente"))
+                st.success(f"Pago programado: {pesos(monto_p)} · prioridad {prioridad}.")
+                st.rerun()
+
+        prog = consultar("SELECT * FROM prog_pagos WHERE obra_id=? ORDER BY id DESC", (obra_id,))
+        if not prog.empty:
+            orden = {"Alta": 0, "Media": 1, "Baja": 2}
+            prog["_o"] = prog["prioridad"].map(lambda x: orden.get(x, 3))
+            prog = prog.sort_values(["estatus", "_o", "semana"])
+            tb = prog[["semana", "contratista", "concepto", "monto", "prioridad", "estatus"]].copy()
+            tb["monto"] = tb["monto"].map(pesos)
+            st.dataframe(tb.rename(columns={"semana": "Semana", "contratista": "Contratista",
+                         "concepto": "Concepto", "monto": "Monto", "prioridad": "Prioridad",
+                         "estatus": "Estatus"}), width="stretch", hide_index=True)
+            pend = prog[prog["estatus"] == "Pendiente"]
+            tot_pend = float(pend["monto"].sum()) if not pend.empty else 0.0
+            tot_pag = float(prog[prog["estatus"] == "Pagado"]["monto"].sum())
+            cpp1, cpp2 = st.columns(2)
+            cpp1.metric("Programado pendiente", f"{pesos(tot_pend)}")
+            cpp2.metric("Programado ya pagado", f"{pesos(tot_pag)}")
+
+            if not pend.empty:
+                st.markdown("##### ✅ Marcar un pago programado como PAGADO")
+                st.caption("Al marcarlo como pagado, el monto se carga al destajo y queda "
+                           "registrado como anticipo.")
+                opc_pp = [(f"{r['semana']} · {r['contratista']} · {r['concepto']} · "
+                           f"{pesos(r['monto'])} ({r['prioridad']})", int(r["id"]))
+                          for _, r in pend.iterrows()]
+                with st.form("form_marcar_pagado"):
+                    selpp = st.selectbox("Pago programado pendiente", [e for e, _ in opc_pp])
+                    ppid = dict(opc_pp)[selpp]
+                    cm1, cm2 = st.columns(2)
+                    with cm1:
+                        f_pago = st.date_input("Fecha de pago", HOY, key="mp_fecha")
+                        metodo_mp = st.selectbox("Método de pago", METODOS_PAGO, key="mp_metodo")
+                    with cm2:
+                        datos_mp = st.text_input("No. tarjeta / CLABE / No. cuenta", key="mp_datos")
+                        banco_mp = st.text_input("Banco y nombre del beneficiario", key="mp_banco")
+                    clave_mp = st.text_input("Clave del Administrador (solo si rebasa lo "
+                                             "contratado)", type="password", key="mp_clave")
+                    marcar = st.form_submit_button("✅ Marcar como PAGADO")
+                if marcar:
+                    pr = consultar("SELECT * FROM prog_pagos WHERE id=?", (ppid,)).iloc[0]
+                    did2 = int(pr["destajo_id"])
+                    monto_pp = float(pr["monto"] or 0)
+                    drow = consultar("SELECT contratista,concepto,pagado,monto_contratado "
+                                     "FROM destajos WHERE id=?", (did2,))
+                    if drow.empty:
+                        st.error("El destajo de este pago ya no existe.")
+                    else:
+                        drow = drow.iloc[0]
+                        actual = float(drow["pagado"] or 0)
+                        cap = float(drow["monto_contratado"] or 0)
+                        nuevo_total = actual + monto_pp
+                        excede = cap > 0 and nuevo_total > cap + 0.009
+                        if excede and not verificar_clave_admin(clave_mp):
+                            st.error(f"⚠️ PRESUPUESTO EXCEDIDO. El acumulado sería "
+                                     f"{pesos(nuevo_total)}, que supera lo contratado "
+                                     f"({pesos(cap)}). No se marcó como pagado. Para autorizarlo, "
+                                     f"captura la clave del Administrador.")
+                        else:
+                            num = int(consultar("SELECT COUNT(*) n FROM pagos_destajo "
+                                                "WHERE destajo_id=?", (did2,))["n"].iloc[0]) + 1
+                            ejecutar("UPDATE destajos SET pagado=?, metodo_pago=?, "
+                                     "datos_bancarios=?, banco_beneficiario=? WHERE id=?",
+                                     (nuevo_total, metodo_mp, mayus(datos_mp),
+                                      mayus(banco_mp), did2))
+                            ejecutar("INSERT INTO pagos_destajo(destajo_id,obra_id,contratista,"
+                                     "concepto,fecha,monto,metodo_pago,datos_bancarios,"
+                                     "banco_beneficiario) VALUES(?,?,?,?,?,?,?,?,?)",
+                                     (did2, obra_id, drow["contratista"], drow["concepto"],
+                                      f_pago.isoformat() + " " + ahora_mx().strftime("%H:%M"),
+                                      monto_pp, metodo_mp, mayus(datos_mp), mayus(banco_mp)))
+                            ejecutar("UPDATE prog_pagos SET estatus='Pagado', fecha_pago=?, "
+                                     "metodo_pago=?, datos_bancarios=?, banco_beneficiario=? "
+                                     "WHERE id=?", (f_pago.isoformat(), metodo_mp,
+                                      mayus(datos_mp), mayus(banco_mp), ppid))
+                            msg = (f"Pago marcado como PAGADO y cargado al destajo "
+                                   f"(Anticipo {num}).")
+                            if excede:
+                                msg += " (AUTORIZADO por el Administrador: rebasa lo contratado)"
+                            st.success(msg); st.rerun()
+
+            st.markdown("##### 🗑️ Eliminar un pago programado")
+            opc_del = [(f"{r['semana']} · {r['contratista']} · {r['concepto']} · "
+                        f"{pesos(r['monto'])} ({r['estatus']})", int(r["id"]))
+                       for _, r in prog.iterrows()]
+            seld = st.selectbox("Selecciona el pago programado a eliminar",
+                                [e for e, _ in opc_del], key="prog_del_sel")
+            st.caption("Eliminar una programación NO descuenta lo ya pagado al destajo.")
+            if st.button("Eliminar programación seleccionada", key="prog_del_btn"):
+                ejecutar("DELETE FROM prog_pagos WHERE id=?", (dict(opc_del)[seld],))
+                st.success("Programación eliminada."); st.rerun()
 
     # ----- Pagos por contratista (ventana desplegable) -----
     if not dest.empty:
