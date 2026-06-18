@@ -1623,6 +1623,24 @@ def pdf_pagos_programados(obra_id: int, ids=None) -> bytes:
     return bytes(pdf.output())
 
 
+def panel_botones(state_key, paneles, ncols=3):
+    """Muestra una fila de botones; devuelve el panel activo. Limpia la pantalla
+    mostrando una sola sección a la vez."""
+    if st.session_state.get(state_key) not in paneles:
+        st.session_state[state_key] = paneles[0]
+    st.caption("Elige una opción:")
+    for i in range(0, len(paneles), ncols):
+        cols = st.columns(ncols)
+        for j, p in enumerate(paneles[i:i + ncols]):
+            activo = (st.session_state[state_key] == p)
+            if cols[j].button(p, key=f"{state_key}_{p}", width="stretch",
+                              type="primary" if activo else "secondary"):
+                st.session_state[state_key] = p
+                st.rerun()
+    st.markdown("---")
+    return st.session_state[state_key]
+
+
 def vista_dashboard(obra_id: int):
     if not requiere_obra(obra_id):
         return
@@ -1712,138 +1730,20 @@ def comprobante_compra_html(compra_id: int) -> str:
     </body></html>"""
 
 
-def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
-    es_gasto = (modo == "gasto")
-    suf = "_g" if es_gasto else ""
-    noun = "gasto" if es_gasto else "compra"
-    nounp = "gastos" if es_gasto else "compras"
-    st.subheader("🧾 Gastos" if es_gasto else "🛒 Compras y gastos diarios")
-    if not requiere_obra(obra_id):
-        return
-    if puede(rol, "todas_obras"):
-        obra_id = selector_obra_trabajo(obra_id, rol,
-                                        f"🏢 Obra a la que se cargará el {noun}",
-                                        f"compras_obra_sel{suf}")
-    obra_nombre = consultar("SELECT nombre FROM obras WHERE id=?", (obra_id,))["nombre"].iloc[0]
-    st.caption(f"Los {nounp} se cargarán a la obra: **{obra_nombre}**")
-
-    proveedores = obtener_proveedores()
-    prov_labels, prov_map = opciones_clave(proveedores) if not proveedores.empty else ([], {})
-    usuarios_df = obtener_usuarios()
-    if not usuarios_df.empty:
-        asign = usuarios_df[usuarios_df["obra_id"] == obra_id]
-        compradores = asign["nombre"].tolist()
-    else:
-        compradores = []
-    cond = "tipo='gasto'" if es_gasto else "(tipo IS NULL OR tipo='compra')"
-    compras = consultar(f"SELECT * FROM compras WHERE obra_id=? AND {cond} "
-                        f"ORDER BY fecha DESC, id DESC", (obra_id,))
-    if not compras.empty:
-        importes = pd.to_numeric(compras["importe"], errors="coerce").fillna(0)
-        fechas = compras["fecha"].astype(str).str[:10]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Gastos registrados" if es_gasto else "Compras registradas", len(compras))
-        c2.metric("Total gastado" if es_gasto else "Total comprado",
-                  f"{pesos(importes.sum())}")
-        hoy_total = importes[fechas == HOY.isoformat()].sum()
-        c3.metric("Gastado hoy" if es_gasto else "Comprado hoy", f"{pesos(hoy_total)}")
-        st.plotly_chart(grafica_compras_categoria(
-            compras, "Gastos por categoría" if es_gasto else "Compras por categoría"),
-            width="stretch", key=f"plt_6{suf}")
-
-    if puede(rol, "editar"):
-        # Alta rápida de proveedor (fuera del formulario para refrescar el listado)
-        with st.expander("➕ Registrar un proveedor nuevo"):
-            with st.form(f"form_prov_rapido{suf}", clear_on_submit=True):
-                col1, col2 = st.columns(2)
-                with col1:
-                    p_codigo = st.text_input("Clave del proveedor")
-                    p_nombre = st.text_input("Proveedor (empresa)")
-                    p_agente = st.text_input("Agente de ventas")
-                    p_tel = st.text_input("Teléfono de contacto")
-                    p_correo = st.text_input("Correo")
-                with col2:
-                    p_cuenta = st.text_input("Número de cuenta")
-                    p_clabe = st.text_input("CLABE interbancaria")
-                    p_tarjeta = st.text_input("Tarjeta")
-                if st.form_submit_button("💾 Guardar proveedor") and p_nombre.strip():
-                    ejecutar("INSERT INTO proveedores(codigo,nombre,agente,telefono,correo,cuenta,"
-                             "clabe,tarjeta) VALUES(?,?,?,?,?,?,?,?)",
-                             (mayus(p_codigo), mayus(p_nombre), mayus(p_agente), p_tel.strip(),
-                              p_correo.strip(), p_cuenta.strip(), p_clabe.strip(), p_tarjeta.strip()))
-                    st.success(f"Proveedor «{mayus(p_nombre)}» guardado."); st.rerun()
-
-        opciones_desc = []
-        if not es_gasto:
-            partidas_pres = consultar("SELECT partida, concepto FROM presupuesto WHERE obra_id=? "
-                                      "ORDER BY partida", (obra_id,))
-            for _, rp in partidas_pres.iterrows():
-                etq = str(rp["partida"] or "").strip()
-                if rp["concepto"]:
-                    etq = f"{etq} · {rp['concepto']}" if etq else str(rp["concepto"])
-                if etq:
-                    opciones_desc.append(etq)
-        st.markdown(f"#### ➕ Registrar un {noun}")
-        with st.form(f"form_compra{suf}", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                fecha = st.date_input(f"Fecha del {noun}", HOY)
-                categoria = st.selectbox("Categoría del gasto", CATEGORIAS_COMPRA)
-            with col2:
-                if opciones_desc:
-                    desc_part = st.selectbox("Descripción / concepto (partida del presupuesto)",
-                                             ["(elegir partida)"] + opciones_desc)
-                    desc_otro = st.text_input("...o escribe otra descripción")
-                else:
-                    desc_part = "(elegir partida)"
-                    desc_otro = st.text_input("Descripción / concepto")
-                if prov_labels:
-                    prov_label = st.selectbox("Proveedor (del catálogo)",
-                                              ["(Escribir proveedor manualmente)"] + prov_labels)
-                    prov_libre = st.text_input("...o escribe el proveedor (sin usar el catálogo)")
-                else:
-                    prov_label = "(Escribir proveedor manualmente)"
-                    prov_libre = st.text_input("Proveedor")
-            with col3:
-                importe = st.number_input("Importe ($ MXN)", min_value=0.0, step=10.0, format="%.2f")
-                if compradores:
-                    comprador = st.selectbox(f"Quién realiza el {noun}", compradores)
-                else:
-                    comprador = st.text_input(f"Quién realiza el {noun}", value=usuario)
-                metodo_pago = st.selectbox("Método de pago", METODOS_PAGO)
-            colA, colB = st.columns(2)
-            with colA:
-                comprobante = st.file_uploader("Comprobante (foto o PDF)",
-                                               type=["png", "jpg", "jpeg", "pdf"])
-            with colB:
-                factura = st.file_uploader("Factura (PDF o XML)",
-                                           type=["pdf", "xml", "png", "jpg", "jpeg"])
-            enviar = st.form_submit_button(f"💾 Guardar {noun}")
-        descripcion = desc_otro.strip() if desc_otro.strip() else (
-            desc_part if desc_part != "(elegir partida)" else "")
-        proveedor = (mayus(prov_libre) if prov_libre.strip()
-                     else (prov_map.get(prov_label, "")
-                           if prov_label != "(Escribir proveedor manualmente)" else ""))
-        if enviar and descripcion.strip():
-            nom_comp = guardar_adjunto(comprobante, "comp")
-            nom_fact = guardar_adjunto(factura, "fact")
-            ejecutar("INSERT INTO compras(obra_id,fecha,categoria,descripcion,importe,"
-                     "proveedor,comprador,comprobante,factura,metodo_pago,hora,tipo) "
-                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (obra_id, fecha.isoformat(), categoria, mayus(descripcion), importe,
-                      proveedor, mayus(comprador), nom_comp, nom_fact, metodo_pago,
-                      ahora_mx().strftime("%H:%M"), modo))
-            st.success(f"{noun.capitalize()} registrado y cargado a la obra.")
-            st.rerun()
-        elif enviar:
-            st.warning(f"Escribe la descripción / concepto del {noun}.")
-    else:
-        st.info("Tu rol (Cliente) es de solo lectura.")
-
-    st.markdown(f"#### Historial de {nounp}")
+def _cp_resumen(compras, es_gasto, suf, nounp):
     if compras.empty:
-        st.caption(f"Aún no hay {nounp} registrados para esta obra.")
-        return
+        st.caption(f"Aún no hay {nounp} registrados para esta obra."); return
+    importes = pd.to_numeric(compras["importe"], errors="coerce").fillna(0)
+    fechas = compras["fecha"].astype(str).str[:10]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Gastos registrados" if es_gasto else "Compras registradas", len(compras))
+    c2.metric("Total gastado" if es_gasto else "Total comprado", f"{pesos(importes.sum())}")
+    hoy_total = importes[fechas == HOY.isoformat()].sum()
+    c3.metric("Gastado hoy" if es_gasto else "Comprado hoy", f"{pesos(hoy_total)}")
+    st.plotly_chart(grafica_compras_categoria(
+        compras, "Gastos por categoría" if es_gasto else "Compras por categoría"),
+        width="stretch", key=f"plt_6{suf}")
+    st.markdown(f"#### Historial de {nounp}")
     cols_hist = ["fecha", "categoria", "descripcion", "proveedor", "comprador", "metodo_pago",
                  "importe"]
     cols_hist = [c for c in cols_hist if c in compras.columns]
@@ -1852,11 +1752,100 @@ def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
     st.dataframe(tabla.rename(columns={"fecha": "Fecha", "categoria": "Categoría",
                  "descripcion": "Descripción", "proveedor": "Proveedor",
                  "comprador": "Comprador", "metodo_pago": "Método de pago",
-                 "importe": "Importe"}),
-                 width="stretch", hide_index=True)
+                 "importe": "Importe"}), width="stretch", hide_index=True)
 
-    # ---- Imprimir la o las compras/gastos a realizar ----
+
+def _cp_registrar(obra_id, usuario, modo, es_gasto, suf, noun, prov_labels, prov_map, compradores):
+    with st.expander("➕ Registrar un proveedor nuevo"):
+        with st.form(f"form_prov_rapido{suf}", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                p_codigo = st.text_input("Clave del proveedor")
+                p_nombre = st.text_input("Proveedor (empresa)")
+                p_agente = st.text_input("Agente de ventas")
+                p_tel = st.text_input("Teléfono de contacto")
+                p_correo = st.text_input("Correo")
+            with col2:
+                p_cuenta = st.text_input("Número de cuenta")
+                p_clabe = st.text_input("CLABE interbancaria")
+                p_tarjeta = st.text_input("Tarjeta")
+            if st.form_submit_button("💾 Guardar proveedor") and p_nombre.strip():
+                ejecutar("INSERT INTO proveedores(codigo,nombre,agente,telefono,correo,cuenta,"
+                         "clabe,tarjeta) VALUES(?,?,?,?,?,?,?,?)",
+                         (mayus(p_codigo), mayus(p_nombre), mayus(p_agente), p_tel.strip(),
+                          p_correo.strip(), p_cuenta.strip(), p_clabe.strip(), p_tarjeta.strip()))
+                st.success(f"Proveedor «{mayus(p_nombre)}» guardado."); st.rerun()
+
+    opciones_desc = []
+    if not es_gasto:
+        partidas_pres = consultar("SELECT partida, concepto FROM presupuesto WHERE obra_id=? "
+                                  "ORDER BY partida", (obra_id,))
+        for _, rp in partidas_pres.iterrows():
+            etq = str(rp["partida"] or "").strip()
+            if rp["concepto"]:
+                etq = f"{etq} · {rp['concepto']}" if etq else str(rp["concepto"])
+            if etq:
+                opciones_desc.append(etq)
+    st.markdown(f"#### ➕ Registrar un {noun}")
+    with st.form(f"form_compra{suf}", clear_on_submit=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            fecha = st.date_input(f"Fecha del {noun}", HOY)
+            categoria = st.selectbox("Categoría del gasto", CATEGORIAS_COMPRA)
+        with col2:
+            if opciones_desc:
+                desc_part = st.selectbox("Descripción / concepto (partida del presupuesto)",
+                                         ["(elegir partida)"] + opciones_desc)
+                desc_otro = st.text_input("...o escribe otra descripción")
+            else:
+                desc_part = "(elegir partida)"
+                desc_otro = st.text_input("Descripción / concepto")
+            if prov_labels:
+                prov_label = st.selectbox("Proveedor (del catálogo)",
+                                          ["(Escribir proveedor manualmente)"] + prov_labels)
+                prov_libre = st.text_input("...o escribe el proveedor (sin usar el catálogo)")
+            else:
+                prov_label = "(Escribir proveedor manualmente)"
+                prov_libre = st.text_input("Proveedor")
+        with col3:
+            importe = st.number_input("Importe ($ MXN)", min_value=0.0, step=10.0, format="%.2f")
+            if compradores:
+                comprador = st.selectbox(f"Quién realiza el {noun}", compradores)
+            else:
+                comprador = st.text_input(f"Quién realiza el {noun}", value=usuario)
+            metodo_pago = st.selectbox("Método de pago", METODOS_PAGO)
+        colA, colB = st.columns(2)
+        with colA:
+            comprobante = st.file_uploader("Comprobante (foto o PDF)",
+                                           type=["png", "jpg", "jpeg", "pdf"])
+        with colB:
+            factura = st.file_uploader("Factura (PDF o XML)",
+                                       type=["pdf", "xml", "png", "jpg", "jpeg"])
+        enviar = st.form_submit_button(f"💾 Guardar {noun}")
+    descripcion = desc_otro.strip() if desc_otro.strip() else (
+        desc_part if desc_part != "(elegir partida)" else "")
+    proveedor = (mayus(prov_libre) if prov_libre.strip()
+                 else (prov_map.get(prov_label, "")
+                       if prov_label != "(Escribir proveedor manualmente)" else ""))
+    if enviar and descripcion.strip():
+        nom_comp = guardar_adjunto(comprobante, "comp")
+        nom_fact = guardar_adjunto(factura, "fact")
+        ejecutar("INSERT INTO compras(obra_id,fecha,categoria,descripcion,importe,"
+                 "proveedor,comprador,comprobante,factura,metodo_pago,hora,tipo) "
+                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (obra_id, fecha.isoformat(), categoria, mayus(descripcion), importe,
+                  proveedor, mayus(comprador), nom_comp, nom_fact, metodo_pago,
+                  ahora_mx().strftime("%H:%M"), modo))
+        st.success(f"{noun.capitalize()} registrado y cargado a la obra.")
+        st.rerun()
+    elif enviar:
+        st.warning(f"Escribe la descripción / concepto del {noun}.")
+
+
+def _cp_imprimir(obra_id, compras, usuario, es_gasto, nounp, suf):
     st.markdown(f"#### 🖨️ Imprimir {nounp} a realizar")
+    if compras.empty:
+        st.caption(f"Aún no hay {nounp} registrados."); return
     st.caption(f"Selecciona uno o varios {nounp}; el documento incluye fecha, hora y quién solicita.")
     opciones_imp = {
         f"{r['fecha']} · {r['descripcion']} · {pesos(r['importe'])}": int(r["id"])
@@ -1872,16 +1861,19 @@ def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
                                file_name=f"{titulo_doc.replace(' ', '_')}_{HOY.isoformat()}.pdf",
                                mime="application/pdf", key=f"dl_compras_lista{suf}")
         else:
-            st.caption(f"Selecciona al menos un {noun} para generar el documento.")
+            st.caption(f"Selecciona al menos un registro para generar el documento.")
     else:
         st.caption("Para el PDF instala una vez: python -m pip install fpdf2")
 
+
+def _cp_adjuntos(compras, noun, nounp):
     st.markdown(f"#### Comprobante PDF, adjuntos y factura por {noun}")
+    if compras.empty:
+        st.caption(f"Aún no hay {nounp} registrados."); return
     con_adjuntos = compras[compras.apply(
         lambda c: _adjunto_existe(c["comprobante"]) or _adjunto_existe(c["factura"]), axis=1)]
     if con_adjuntos.empty:
-        st.caption("Aún no hay compras con comprobante o factura adjunta.")
-        return
+        st.caption("Aún no hay compras con comprobante o factura adjunta."); return
     st.caption("Solo se muestran las compras que tienen comprobante o factura subidos:")
     for _, c in con_adjuntos.iterrows():
         st.write(f"**{c['fecha']}** · {c['categoria']} · {c['descripcion']} ({pesos(c['importe'])})")
@@ -1911,34 +1903,70 @@ def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
                     unsafe_allow_html=True)
 
 
+def vista_compras(obra_id: int, rol: str, usuario: str, modo: str = "compra"):
+    es_gasto = (modo == "gasto")
+    suf = "_g" if es_gasto else ""
+    noun = "gasto" if es_gasto else "compra"
+    nounp = "gastos" if es_gasto else "compras"
+    st.subheader("🧾 Gastos" if es_gasto else "🛒 Compras y gastos diarios")
+    if not requiere_obra(obra_id):
+        return
+    if puede(rol, "todas_obras"):
+        obra_id = selector_obra_trabajo(obra_id, rol,
+                                        f"🏢 Obra a la que se cargará el {noun}",
+                                        f"compras_obra_sel{suf}")
+    obra_nombre = consultar("SELECT nombre FROM obras WHERE id=?", (obra_id,))["nombre"].iloc[0]
+    st.caption(f"Los {nounp} se cargarán a la obra: **{obra_nombre}**")
+    proveedores = obtener_proveedores()
+    prov_labels, prov_map = opciones_clave(proveedores) if not proveedores.empty else ([], {})
+    usuarios_df = obtener_usuarios()
+    compradores = (usuarios_df[usuarios_df["obra_id"] == obra_id]["nombre"].tolist()
+                   if not usuarios_df.empty else [])
+    cond = "tipo='gasto'" if es_gasto else "(tipo IS NULL OR tipo='compra')"
+    compras = consultar(f"SELECT * FROM compras WHERE obra_id=? AND {cond} "
+                        f"ORDER BY fecha DESC, id DESC", (obra_id,))
+    if puede(rol, "editar"):
+        paneles = ["📊 Resumen e historial", "➕ Registrar", "🖨️ Imprimir a realizar",
+                   "📎 Comprobantes y facturas"]
+    else:
+        st.info("Tu rol (Cliente) es de solo lectura.")
+        paneles = ["📊 Resumen e historial", "📎 Comprobantes y facturas"]
+    panel = panel_botones(f"cp_panel{suf}", paneles)
+    if panel == "📊 Resumen e historial":
+        _cp_resumen(compras, es_gasto, suf, nounp)
+    elif panel == "➕ Registrar":
+        _cp_registrar(obra_id, usuario, modo, es_gasto, suf, noun, prov_labels, prov_map, compradores)
+    elif panel == "🖨️ Imprimir a realizar":
+        _cp_imprimir(obra_id, compras, usuario, es_gasto, nounp, suf)
+    elif panel == "📎 Comprobantes y facturas":
+        _cp_adjuntos(compras, noun, nounp)
+
+
 def vista_gastos(obra_id: int, rol: str, usuario: str):
     vista_compras(obra_id, rol, usuario, modo="gasto")
 
 
-def vista_crm(rol: str):
-    st.subheader("🤝 CRM · Clientes y prospectos")
-    if not puede(rol, "crm"):
-        st.warning("El módulo CRM es exclusivo del Administrador."); return
-    clientes = obtener_clientes(); obras = obtener_obras()
+def _crm_cartera(clientes, obras):
     c1, c2, c3 = st.columns(3)
     c1.metric("Clientes totales", len(clientes))
     c2.metric("Prospectos", int((clientes["tipo"] == "Prospecto").sum()) if not clientes.empty else 0)
     c3.metric("Cartera de obras", f"{pesos(obras['presupuesto'].sum() if not obras.empty else 0)}")
     if clientes.empty:
-        st.caption("Aún no hay clientes. Registra el primero abajo.")
-    else:
-        st.markdown("#### Cartera por cliente")
-        for _, cli in clientes.iterrows():
-            obras_cli = obras[obras["cliente"] == cli["empresa"]] if not obras.empty else pd.DataFrame()
-            tot = obras_cli["presupuesto"].sum() if not obras_cli.empty else 0
-            with st.expander(f"🏢 {cli['empresa']}  ·  {cli['tipo']}  ·  {pesos(tot)}"):
-                st.write(f"Contacto: {cli['contacto']}  ·  📞 {cli['telefono']}  ·  ✉️ {cli['correo']}")
-                if cli["notas"]:
-                    st.write(f"*{cli['notas']}*")
-                if not obras_cli.empty:
-                    st.dataframe(obras_cli[["nombre", "ubicacion", "presupuesto", "estatus"]],
-                                 width="stretch", hide_index=True)
-    st.markdown("---")
+        st.caption("Aún no hay clientes. Usa «➕ Nuevo cliente» para registrar el primero."); return
+    st.markdown("#### Cartera por cliente")
+    for _, cli in clientes.iterrows():
+        obras_cli = obras[obras["cliente"] == cli["empresa"]] if not obras.empty else pd.DataFrame()
+        tot = obras_cli["presupuesto"].sum() if not obras_cli.empty else 0
+        with st.expander(f"🏢 {cli['empresa']}  ·  {cli['tipo']}  ·  {pesos(tot)}"):
+            st.write(f"Contacto: {cli['contacto']}  ·  📞 {cli['telefono']}  ·  ✉️ {cli['correo']}")
+            if cli["notas"]:
+                st.write(f"*{cli['notas']}*")
+            if not obras_cli.empty:
+                st.dataframe(obras_cli[["nombre", "ubicacion", "presupuesto", "estatus"]],
+                             width="stretch", hide_index=True)
+
+
+def _crm_nuevo():
     st.markdown("#### Registrar nuevo cliente / prospecto")
     with st.form("form_cliente", clear_on_submit=True):
         col1, col2 = st.columns(2)
@@ -1953,31 +1981,47 @@ def vista_crm(rol: str):
                      "VALUES(?,?,?,?,?,?)", (mayus(empresa), mayus(contacto), telefono.strip(), correo.strip(), tipo, mayus(notas)))
             st.success(f"Cliente «{empresa}» guardado."); st.rerun()
 
-    if not clientes.empty:
-        st.markdown("---")
-        st.markdown("#### ✏️ Modificar un cliente")
-        st.caption("Si registraste un cliente con datos incompletos, aquí puedes completarlos "
-                   "o corregirlos después.")
-        emp_sel = st.selectbox("Selecciona el cliente a modificar",
-                               clientes["empresa"].tolist(), key="crm_edit_sel")
-        c = clientes[clientes["empresa"] == emp_sel].iloc[0]
-        with st.form("form_cliente_editar"):
-            col1, col2 = st.columns(2)
-            with col1:
-                e_empresa = st.text_input("Empresa", value=c["empresa"] or "")
-                e_contacto = st.text_input("Contacto", value=c["contacto"] or "")
-                e_telefono = st.text_input("Teléfono", value=c["telefono"] or "")
-            with col2:
-                e_correo = st.text_input("Correo", value=c["correo"] or "")
-                tipo_idx = TIPO_CLIENTE.index(c["tipo"]) if c["tipo"] in TIPO_CLIENTE else 0
-                e_tipo = st.selectbox("Tipo", TIPO_CLIENTE, index=tipo_idx)
-                e_notas = st.text_input("Notas", value=c["notas"] or "")
-            if st.form_submit_button("💾 Guardar cambios") and e_empresa.strip():
-                ejecutar("UPDATE clientes SET empresa=?, contacto=?, telefono=?, correo=?, "
-                         "tipo=?, notas=? WHERE id=?",
-                         (mayus(e_empresa), mayus(e_contacto), e_telefono.strip(), e_correo.strip(), e_tipo,
-                          mayus(e_notas), int(c["id"])))
-                st.success(f"Datos de «{e_empresa}» actualizados."); st.rerun()
+
+def _crm_modificar(clientes):
+    st.markdown("#### ✏️ Modificar un cliente")
+    if clientes.empty:
+        st.caption("Aún no hay clientes."); return
+    st.caption("Si registraste un cliente con datos incompletos, aquí puedes completarlos "
+               "o corregirlos después.")
+    emp_sel = st.selectbox("Selecciona el cliente a modificar",
+                           clientes["empresa"].tolist(), key="crm_edit_sel")
+    c = clientes[clientes["empresa"] == emp_sel].iloc[0]
+    with st.form("form_cliente_editar"):
+        col1, col2 = st.columns(2)
+        with col1:
+            e_empresa = st.text_input("Empresa", value=c["empresa"] or "")
+            e_contacto = st.text_input("Contacto", value=c["contacto"] or "")
+            e_telefono = st.text_input("Teléfono", value=c["telefono"] or "")
+        with col2:
+            e_correo = st.text_input("Correo", value=c["correo"] or "")
+            tipo_idx = TIPO_CLIENTE.index(c["tipo"]) if c["tipo"] in TIPO_CLIENTE else 0
+            e_tipo = st.selectbox("Tipo", TIPO_CLIENTE, index=tipo_idx)
+            e_notas = st.text_input("Notas", value=c["notas"] or "")
+        if st.form_submit_button("💾 Guardar cambios") and e_empresa.strip():
+            ejecutar("UPDATE clientes SET empresa=?, contacto=?, telefono=?, correo=?, "
+                     "tipo=?, notas=? WHERE id=?",
+                     (mayus(e_empresa), mayus(e_contacto), e_telefono.strip(), e_correo.strip(), e_tipo,
+                      mayus(e_notas), int(c["id"])))
+            st.success(f"Datos de «{e_empresa}» actualizados."); st.rerun()
+
+
+def vista_crm(rol: str):
+    st.subheader("🤝 CRM · Clientes y prospectos")
+    if not puede(rol, "crm"):
+        st.warning("El módulo CRM es exclusivo del Administrador."); return
+    clientes = obtener_clientes(); obras = obtener_obras()
+    panel = panel_botones("crm_panel", ["📋 Cartera", "➕ Nuevo cliente", "✏️ Modificar"])
+    if panel == "📋 Cartera":
+        _crm_cartera(clientes, obras)
+    elif panel == "➕ Nuevo cliente":
+        _crm_nuevo()
+    elif panel == "✏️ Modificar":
+        _crm_modificar(clientes)
 
 
 def vista_respaldo(rol: str):
@@ -2100,20 +2144,17 @@ def dlg_modificar_usuario(usuarios, obras):
         st.rerun()
 
 
-def vista_usuarios(rol: str):
-    st.subheader("👤 Usuarios y roles")
-    if not puede(rol, "usuarios"):
-        st.warning("Solo el Administrador puede gestionar usuarios."); return
-    usuarios = obtener_usuarios()
+def _us_lista(usuarios):
+    st.markdown("#### Usuarios registrados")
     if usuarios.empty:
-        st.caption("Aún no hay usuarios. Da de alta el primero abajo.")
-    else:
-        vis = usuarios[["codigo", "nombre", "rol", "obra", "telefono", "correo"]].rename(
-            columns={"codigo": "Clave", "nombre": "Nombre", "rol": "Rol",
-                     "obra": "Obra asignada", "telefono": "Teléfono", "correo": "Correo"})
-        st.dataframe(vis, width="stretch", hide_index=True)
+        st.caption("Aún no hay usuarios. Usa «➕ Dar de alta»."); return
+    vis = usuarios[["codigo", "nombre", "rol", "obra", "telefono", "correo"]].rename(
+        columns={"codigo": "Clave", "nombre": "Nombre", "rol": "Rol",
+                 "obra": "Obra asignada", "telefono": "Teléfono", "correo": "Correo"})
+    st.dataframe(vis, width="stretch", hide_index=True)
 
-    obras = obtener_obras()
+
+def _us_alta(obras):
     st.markdown("#### Dar de alta un usuario")
     st.caption("El usuario entrará a la plataforma con la clave de acceso que le asignes aquí.")
     with st.form("form_user", clear_on_submit=True):
@@ -2144,39 +2185,45 @@ def vista_usuarios(rol: str):
                      (mayus(codigo), mayus(nombre), rol_u, telefono.strip(), correo.strip(), oid, _hash(clave)))
             st.success(f"Usuario «{nombre}» creado con rol {rol_u}."); st.rerun()
 
-    if not usuarios.empty:
-        st.markdown("---")
-        st.markdown("#### Modificar un usuario")
-        st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
-        if st.button("✏️ Modificar un usuario", key="btn_mod_user"):
-            st.session_state["ask_user"] = True
-            st.session_state["open_user_dlg"] = False
-        if st.session_state.get("ask_user") and not st.session_state.get("open_user_dlg"):
-            cl = st.text_input("Clave del Administrador", type="password", key="cl_user")
-            cc1, cc2 = st.columns(2)
-            if cc1.button("Abrir ventana de edición", key="ok_user"):
-                if verificar_clave_admin(cl):
-                    st.session_state["open_user_dlg"] = True
-                    st.session_state["ask_user"] = False
-                    st.rerun()
-                else:
-                    st.error("Clave del Administrador incorrecta.")
-            if cc2.button("Cancelar", key="cancel_user_ask"):
+
+def _us_modificar(usuarios, obras):
+    st.markdown("#### Modificar un usuario")
+    if usuarios.empty:
+        st.caption("Aún no hay usuarios."); return
+    st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
+    if st.button("✏️ Modificar un usuario", key="btn_mod_user"):
+        st.session_state["ask_user"] = True
+        st.session_state["open_user_dlg"] = False
+    if st.session_state.get("ask_user") and not st.session_state.get("open_user_dlg"):
+        cl = st.text_input("Clave del Administrador", type="password", key="cl_user")
+        cc1, cc2 = st.columns(2)
+        if cc1.button("Abrir ventana de edición", key="ok_user"):
+            if verificar_clave_admin(cl):
+                st.session_state["open_user_dlg"] = True
                 st.session_state["ask_user"] = False
                 st.rerun()
-        if st.session_state.get("open_user_dlg"):
-            dlg_modificar_usuario(usuarios, obras)
+            else:
+                st.error("Clave del Administrador incorrecta.")
+        if cc2.button("Cancelar", key="cancel_user_ask"):
+            st.session_state["ask_user"] = False
+            st.rerun()
+    if st.session_state.get("open_user_dlg"):
+        dlg_modificar_usuario(usuarios, obras)
 
-    if not usuarios.empty:
-        st.markdown("#### Restablecer la clave de un usuario")
-        with st.form("form_reset_clave"):
-            u_sel = st.selectbox("Usuario", usuarios["nombre"].tolist())
-            nueva = st.text_input("Nueva clave", type="password")
-            if st.form_submit_button("🔑 Cambiar clave") and nueva:
-                ejecutar("UPDATE usuarios SET clave_hash=? WHERE nombre=?", (_hash(nueva), u_sel))
-                st.success(f"Clave de «{u_sel}» actualizada."); st.rerun()
 
-    st.markdown("---")
+def _us_clave(usuarios):
+    st.markdown("#### Restablecer la clave de un usuario")
+    if usuarios.empty:
+        st.caption("Aún no hay usuarios."); return
+    with st.form("form_reset_clave"):
+        u_sel = st.selectbox("Usuario", usuarios["nombre"].tolist())
+        nueva = st.text_input("Nueva clave", type="password")
+        if st.form_submit_button("🔑 Cambiar clave") and nueva:
+            ejecutar("UPDATE usuarios SET clave_hash=? WHERE nombre=?", (_hash(nueva), u_sel))
+            st.success(f"Clave de «{u_sel}» actualizada."); st.rerun()
+
+
+def _us_seguridad():
     st.markdown("#### 🔒 Seguridad del Administrador (recomendado al publicar en internet)")
     actual = cfg_get("admin_pass_hash")
     st.caption("Estado: " + ("✅ El Administrador ya requiere clave."
@@ -2196,36 +2243,53 @@ def vista_usuarios(rol: str):
             st.rerun()
 
 
-def vista_proveedores(rol: str):
-    st.subheader("🏭 Proveedores")
+def vista_usuarios(rol: str):
+    st.subheader("👤 Usuarios y roles")
+    if not puede(rol, "usuarios"):
+        st.warning("Solo el Administrador puede gestionar usuarios."); return
+    usuarios = obtener_usuarios()
+    obras = obtener_obras()
+    panel = panel_botones("us_panel", ["📋 Usuarios", "➕ Dar de alta", "✏️ Modificar",
+                                       "🔑 Restablecer clave", "🔒 Seguridad"])
+    if panel == "📋 Usuarios":
+        _us_lista(usuarios)
+    elif panel == "➕ Dar de alta":
+        _us_alta(obras)
+    elif panel == "✏️ Modificar":
+        _us_modificar(usuarios, obras)
+    elif panel == "🔑 Restablecer clave":
+        _us_clave(usuarios)
+    elif panel == "🔒 Seguridad":
+        _us_seguridad()
+
+
+def _pv_catalogo(rol, prov):
     if puede(rol, "todas_obras"):
         obra_prev = st.session_state.get("obra_trabajo_id")
         selector_obra_trabajo(obra_prev, rol, "🏢 Obra de trabajo (para cargar compras)",
                               "prov_obra_sel")
         st.caption("Los proveedores son compartidos entre todas las obras. Esta selección define "
                    "la obra a la que se cargarán las compras en la sección «Compras».")
-    prov = obtener_proveedores()
     st.metric("Proveedores registrados", len(prov))
     if prov.empty:
-        st.caption("Aún no hay proveedores. Registra el primero abajo.")
-    else:
-        st.markdown("#### Catálogo de proveedores")
-        for _, p in prov.iterrows():
-            cod = p["codigo"] if "codigo" in prov.columns and p["codigo"] else ""
-            enc = f"🏭 {cod + ' · ' if cod else ''}{p['nombre']}  ·  Agente: {p['agente'] or '—'}"
-            with st.expander(enc):
-                st.write(f"📞 {p['telefono'] or '—'}  ·  ✉️ {p['correo'] or '—'}")
-                st.write(f"**Clave:** {cod or '—'}")
-                st.write(f"**Cuenta:** {p['cuenta'] or '—'}")
-                st.write(f"**CLABE:** {p['clabe'] or '—'}")
-                st.write(f"**Tarjeta:** {p['tarjeta'] or '—'}")
-                banco_v = p["banco"] if "banco" in prov.columns and p["banco"] else "—"
-                benef_v = p["beneficiario"] if "beneficiario" in prov.columns and p["beneficiario"] else "—"
-                st.write(f"**Banco:** {banco_v}")
-                st.write(f"**Beneficiario:** {benef_v}")
-    if not puede(rol, "editar"):
-        st.info("Solo Administrador o Ingeniero pueden registrar proveedores."); return
-    st.markdown("---")
+        st.caption("Aún no hay proveedores. Usa «➕ Registrar nuevo»."); return
+    st.markdown("#### Catálogo de proveedores")
+    for _, p in prov.iterrows():
+        cod = p["codigo"] if "codigo" in prov.columns and p["codigo"] else ""
+        enc = f"🏭 {cod + ' · ' if cod else ''}{p['nombre']}  ·  Agente: {p['agente'] or '—'}"
+        with st.expander(enc):
+            st.write(f"📞 {p['telefono'] or '—'}  ·  ✉️ {p['correo'] or '—'}")
+            st.write(f"**Clave:** {cod or '—'}")
+            st.write(f"**Cuenta:** {p['cuenta'] or '—'}")
+            st.write(f"**CLABE:** {p['clabe'] or '—'}")
+            st.write(f"**Tarjeta:** {p['tarjeta'] or '—'}")
+            banco_v = p["banco"] if "banco" in prov.columns and p["banco"] else "—"
+            benef_v = p["beneficiario"] if "beneficiario" in prov.columns and p["beneficiario"] else "—"
+            st.write(f"**Banco:** {banco_v}")
+            st.write(f"**Beneficiario:** {benef_v}")
+
+
+def _pv_nuevo():
     st.markdown("#### Registrar nuevo proveedor")
     with st.form("form_prov", clear_on_submit=True):
         col1, col2 = st.columns(2)
@@ -2249,17 +2313,34 @@ def vista_proveedores(rol: str):
                       mayus(banco), mayus(beneficiario)))
             st.success(f"Proveedor «{mayus(nombre)}» guardado."); st.rerun()
 
-    if not prov.empty:
-        st.markdown("---")
-        st.markdown("#### ✏️ Modificar un proveedor")
-        st.caption("Cualquier usuario con acceso puede corregir los datos del proveedor.")
-        if st.button("✏️ Modificar un proveedor", key="btn_mod_prov"):
-            st.session_state["open_prov_dlg"] = True
-        if st.session_state.get("open_prov_dlg"):
-            dlg_modificar_proveedor(prov)
+
+def _pv_modificar(prov):
+    st.markdown("#### ✏️ Modificar un proveedor")
+    if prov.empty:
+        st.caption("Aún no hay proveedores."); return
+    st.caption("Cualquier usuario con acceso puede corregir los datos del proveedor.")
+    if st.button("✏️ Modificar un proveedor", key="btn_mod_prov"):
+        st.session_state["open_prov_dlg"] = True
+    if st.session_state.get("open_prov_dlg"):
+        dlg_modificar_proveedor(prov)
 
 
-@st.dialog("✏️ Modificar proveedor")
+def vista_proveedores(rol: str):
+    st.subheader("🏭 Proveedores")
+    prov = obtener_proveedores()
+    if puede(rol, "editar"):
+        paneles = ["📋 Catálogo", "➕ Registrar nuevo", "✏️ Modificar"]
+    else:
+        paneles = ["📋 Catálogo"]
+    panel = panel_botones("pv_panel", paneles)
+    if panel == "📋 Catálogo":
+        _pv_catalogo(rol, prov)
+    elif panel == "➕ Registrar nuevo":
+        _pv_nuevo()
+    elif panel == "✏️ Modificar":
+        _pv_modificar(prov)
+
+
 def dlg_modificar_proveedor(prov):
     labels, mapa = opciones_clave(prov)
     lbl = st.selectbox("Proveedor a modificar", labels, key="dlg_pr_sel")
@@ -2359,62 +2440,58 @@ def dlg_modificar_contratista(contr):
         st.rerun()
 
 
-def vista_obras(rol: str):
-    st.subheader("🏢 Obras · Alta y listado")
-    obras = obtener_obras()
-    if not obras.empty:
-        st.dataframe(obras[["codigo", "nombre", "cliente", "ubicacion", "ingeniero",
-                            "presupuesto", "fecha_inicio", "fecha_fin", "estatus"]]
-                     .rename(columns={"codigo": "Clave", "nombre": "Obra", "cliente": "Cliente",
-                                      "ubicacion": "Ubicación", "ingeniero": "Responsable",
-                                      "presupuesto": "Presupuesto", "fecha_inicio": "Inicio",
-                                      "fecha_fin": "Término", "estatus": "Estatus"}),
-                     width="stretch", hide_index=True)
+def _ob_listado(obras):
+    st.markdown("#### Obras registradas")
+    if obras.empty:
+        st.caption("Aún no hay obras. Usa «➕ Nueva obra»."); return
+    st.dataframe(obras[["codigo", "nombre", "cliente", "ubicacion", "ingeniero",
+                        "presupuesto", "fecha_inicio", "fecha_fin", "estatus"]]
+                 .rename(columns={"codigo": "Clave", "nombre": "Obra", "cliente": "Cliente",
+                                  "ubicacion": "Ubicación", "ingeniero": "Responsable",
+                                  "presupuesto": "Presupuesto", "fecha_inicio": "Inicio",
+                                  "fecha_fin": "Término", "estatus": "Estatus"}),
+                 width="stretch", hide_index=True)
+
+
+def _ob_contrato(obras):
+    st.markdown("#### 📄 Contrato aprobado (PDF)")
+    if obras.empty:
+        st.caption("Aún no hay obras."); return
+    ob_labels_c, ob_map_c = opciones_clave(obras)
+    oc_lbl = st.selectbox("Selecciona la obra", ob_labels_c, key="contrato_obra_sel")
+    oc_id = obra_id_por_nombre(ob_map_c[oc_lbl])
+    actual = obtener_contrato(oc_id)
+    if actual is not None:
+        import base64
+        st.success(f"Contrato cargado: {actual['nombre']}  ·  subido el {actual['fecha']}")
+        st.download_button("📄 Descargar contrato aprobado",
+                           data=base64.b64decode(actual["contenido"]),
+                           file_name=actual["nombre"], mime="application/pdf", key="dl_contrato")
     else:
-        st.caption("Aún no hay obras registradas. Crea la primera abajo.")
-    if not puede(rol, "admin"):
-        st.info("Solo el Administrador puede dar de alta o modificar obras."); return
+        st.caption("Esta obra aún no tiene contrato aprobado cargado.")
+    pdf_contrato = st.file_uploader("Cargar / reemplazar contrato aprobado (PDF)",
+                                    type=["pdf"], key="up_contrato")
+    if pdf_contrato is not None and st.button("💾 Guardar contrato", key="save_contrato"):
+        guardar_contrato(oc_id, pdf_contrato)
+        st.success("Contrato aprobado guardado."); st.rerun()
+    link_actual = consultar("SELECT contrato_link FROM obras WHERE id=?",
+                            (oc_id,))["contrato_link"].iloc[0]
+    st.caption("Opción recomendada para internet: pega un link del contrato "
+               "(Google Drive, Dropbox, etc.). El link no se borra al reiniciarse el servidor.")
+    nuevo_link = st.text_input("Link del contrato (opcional)", value=link_actual or "",
+                               key="contrato_link_in")
+    if st.button("💾 Guardar link del contrato", key="save_link_contrato"):
+        ejecutar("UPDATE obras SET contrato_link=? WHERE id=?", (nuevo_link.strip(), oc_id))
+        st.success("Link del contrato guardado."); st.rerun()
+    if link_actual:
+        st.markdown(f"🔗 [Abrir contrato en el navegador]({link_actual})")
 
-    # ----- Contrato aprobado (PDF) por obra -----
-    if not obras.empty:
-        st.markdown("#### 📄 Contrato aprobado (PDF)")
-        ob_labels_c, ob_map_c = opciones_clave(obras)
-        oc_lbl = st.selectbox("Selecciona la obra", ob_labels_c, key="contrato_obra_sel")
-        oc_id = obra_id_por_nombre(ob_map_c[oc_lbl])
-        actual = obtener_contrato(oc_id)
-        if actual is not None:
-            import base64
-            st.success(f"Contrato cargado: {actual['nombre']}  ·  subido el {actual['fecha']}")
-            st.download_button("📄 Descargar contrato aprobado",
-                               data=base64.b64decode(actual["contenido"]),
-                               file_name=actual["nombre"], mime="application/pdf",
-                               key="dl_contrato")
-        else:
-            st.caption("Esta obra aún no tiene contrato aprobado cargado.")
-        pdf_contrato = st.file_uploader("Cargar / reemplazar contrato aprobado (PDF)",
-                                        type=["pdf"], key="up_contrato")
-        if pdf_contrato is not None and st.button("💾 Guardar contrato", key="save_contrato"):
-            guardar_contrato(oc_id, pdf_contrato)
-            st.success("Contrato aprobado guardado."); st.rerun()
 
-        link_actual = consultar("SELECT contrato_link FROM obras WHERE id=?",
-                                (oc_id,))["contrato_link"].iloc[0]
-        st.caption("Opción recomendada para internet: pega un link del contrato "
-                   "(Google Drive, Dropbox, etc.). El link no se borra al reiniciarse el servidor.")
-        nuevo_link = st.text_input("Link del contrato (opcional)", value=link_actual or "",
-                                   key="contrato_link_in")
-        if st.button("💾 Guardar link del contrato", key="save_link_contrato"):
-            ejecutar("UPDATE obras SET contrato_link=? WHERE id=?", (nuevo_link.strip(), oc_id))
-            st.success("Link del contrato guardado."); st.rerun()
-        if link_actual:
-            st.markdown(f"🔗 [Abrir contrato en el navegador]({link_actual})")
-        st.markdown("---")
-
+def _ob_nueva():
     st.markdown("#### Dar de alta una nueva obra")
     clientes = obtener_clientes()
     if clientes.empty:
-        st.warning("Primero registra un cliente en el apartado «CRM».")
-        return
+        st.warning("Primero registra un cliente en el apartado «CRM»."); return
     with st.form("form_obra", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
@@ -2449,69 +2526,85 @@ def vista_obras(rol: str):
                          (oid, et, i.isoformat(), f.isoformat(), "Por iniciar", 0))
             st.success(f"Obra «{nombre}» creada con sus etapas base."); st.rerun()
 
-    # ----- Modificar una obra (botón -> clave -> ventana) -----
-    if not obras.empty:
-        st.markdown("---")
-        st.markdown("#### Modificar una obra")
-        st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
-        if st.button("✏️ Modificar una obra", key="btn_mod_obra"):
-            st.session_state["ask_obra"] = True
-            st.session_state["open_obra_dlg"] = False
-        if st.session_state.get("ask_obra") and not st.session_state.get("open_obra_dlg"):
-            cl = st.text_input("Clave del Administrador", type="password", key="cl_obra")
-            cc1, cc2 = st.columns(2)
-            if cc1.button("Abrir ventana de edición", key="ok_obra"):
-                if verificar_clave_admin(cl):
-                    st.session_state["open_obra_dlg"] = True
-                    st.session_state["ask_obra"] = False
-                    st.rerun()
-                else:
-                    st.error("Clave del Administrador incorrecta.")
-            if cc2.button("Cancelar", key="cancel_obra_ask"):
+
+def _ob_modificar(obras):
+    st.markdown("#### Modificar una obra")
+    if obras.empty:
+        st.caption("Aún no hay obras."); return
+    clientes = obtener_clientes()
+    st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
+    if st.button("✏️ Modificar una obra", key="btn_mod_obra"):
+        st.session_state["ask_obra"] = True
+        st.session_state["open_obra_dlg"] = False
+    if st.session_state.get("ask_obra") and not st.session_state.get("open_obra_dlg"):
+        cl = st.text_input("Clave del Administrador", type="password", key="cl_obra")
+        cc1, cc2 = st.columns(2)
+        if cc1.button("Abrir ventana de edición", key="ok_obra"):
+            if verificar_clave_admin(cl):
+                st.session_state["open_obra_dlg"] = True
                 st.session_state["ask_obra"] = False
                 st.rerun()
-        if st.session_state.get("open_obra_dlg"):
-            dlg_modificar_obra(obras, clientes)
+            else:
+                st.error("Clave del Administrador incorrecta.")
+        if cc2.button("Cancelar", key="cancel_obra_ask"):
+            st.session_state["ask_obra"] = False
+            st.rerun()
+    if st.session_state.get("open_obra_dlg"):
+        dlg_modificar_obra(obras, clientes)
 
 
-def vista_contratistas(rol: str):
-    st.subheader("👷 Contratistas · Alta y asignación a obra")
-    contr = consultar("SELECT * FROM contratistas ORDER BY nombre")
+def vista_obras(rol: str):
+    st.subheader("🏢 Obras · Alta y listado")
     obras = obtener_obras()
+    if puede(rol, "admin"):
+        paneles = ["📋 Listado", "📄 Contrato (PDF)", "➕ Nueva obra", "✏️ Modificar"]
+    else:
+        paneles = ["📋 Listado"]
+    panel = panel_botones("ob_panel", paneles)
+    if panel == "📋 Listado":
+        _ob_listado(obras)
+    elif panel == "📄 Contrato (PDF)":
+        _ob_contrato(obras)
+    elif panel == "➕ Nueva obra":
+        _ob_nueva()
+    elif panel == "✏️ Modificar":
+        _ob_modificar(obras)
+
+
+def _co_lista(contr):
     st.markdown("#### Contratistas registrados y sus obras")
     if contr.empty:
-        st.caption("Aún no hay contratistas registrados.")
-    else:
-        for _, c in contr.iterrows():
-            cod = c["codigo"] if "codigo" in contr.columns and c["codigo"] else ""
-            enc = f"👷 {cod + ' · ' if cod else ''}{c['nombre']}  ·  {c['especialidad']}  ·  📞 {c['telefono']}"
-            asign = consultar("SELECT o.nombre AS obra, d.concepto, d.monto_contratado, d.estatus "
-                              "FROM destajos d JOIN obras o ON d.obra_id=o.id "
-                              "WHERE d.contratista=?", (c["nombre"],))
-            with st.expander(enc):
-                ctrl = control_contratista(c["nombre"])
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Monto contratado", pesos(ctrl["cap"]))
-                m2.metric("Asignado en destajos", pesos(ctrl["asignado"]))
-                m3.metric("Pagado", pesos(ctrl["pagado"]))
-                if ctrl["excedido"]:
-                    st.error("⚠️ CONTRATO EXCEDIDO")
-                elif ctrl["cap"] > 0:
-                    st.caption(f"Disponible por asignar: {pesos(ctrl['disponible'])}")
-                else:
-                    st.caption("Sin monto contratado definido (sin control de tope).")
-                if asign.empty:
-                    st.caption("Sin obras asignadas todavía.")
-                else:
-                    t = asign.copy()
-                    t["monto_contratado"] = t["monto_contratado"].map(lambda x: f"{pesos(x)}")
-                    st.dataframe(t.rename(columns={"obra": "Obra", "concepto": "Concepto",
-                                 "monto_contratado": "Contratado", "estatus": "Estatus"}),
-                                 width="stretch", hide_index=True)
-    if not puede(rol, "editar"):
-        st.info("Solo Administrador o Ingeniero pueden registrar/asignar contratistas."); return
-    st.markdown("---")
-    st.markdown("#### 1) Registrar un contratista nuevo")
+        st.caption("Aún no hay contratistas registrados."); return
+    for _, c in contr.iterrows():
+        cod = c["codigo"] if "codigo" in contr.columns and c["codigo"] else ""
+        enc = f"👷 {cod + ' · ' if cod else ''}{c['nombre']}  ·  {c['especialidad']}  ·  📞 {c['telefono']}"
+        asign = consultar("SELECT o.nombre AS obra, d.concepto, d.monto_contratado, d.estatus "
+                          "FROM destajos d JOIN obras o ON d.obra_id=o.id "
+                          "WHERE d.contratista=?", (c["nombre"],))
+        with st.expander(enc):
+            ctrl = control_contratista(c["nombre"])
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Monto contratado", pesos(ctrl["cap"]))
+            m2.metric("Asignado en destajos", pesos(ctrl["asignado"]))
+            m3.metric("Pagado", pesos(ctrl["pagado"]))
+            if ctrl["excedido"]:
+                st.error("⚠️ CONTRATO EXCEDIDO")
+            elif ctrl["cap"] > 0:
+                st.caption(f"Disponible por asignar: {pesos(ctrl['disponible'])}")
+            else:
+                st.caption("Sin monto contratado definido (sin control de tope).")
+            if asign.empty:
+                st.caption("Sin obras asignadas todavía.")
+            else:
+                t = asign.copy()
+                t["monto_contratado"] = t["monto_contratado"].map(lambda x: f"{pesos(x)}")
+                st.dataframe(t.rename(columns={"obra": "Obra", "concepto": "Concepto",
+                             "monto_contratado": "Contratado", "estatus": "Estatus"}),
+                             width="stretch", hide_index=True)
+
+
+def _co_nuevo():
+    st.markdown("#### Registrar un contratista nuevo")
     with st.form("form_contr", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
@@ -2537,111 +2630,136 @@ def vista_contratistas(rol: str):
                       correo.strip(), monto_contr, mayus(beneficiario), mayus(banco),
                       cuenta.strip(), clabe.strip(), tarjeta.strip()))
             st.success(f"Contratista «{nombre}» registrado."); st.rerun()
-    st.markdown("#### 2) Asignar un contratista a una obra")
+
+
+def _co_asignar(contr, obras):
+    st.markdown("#### Asignar un contratista a una obra")
     if contr.empty or obras.empty:
-        st.caption("Necesitas al menos un contratista y una obra registrados.")
+        st.caption("Necesitas al menos un contratista y una obra registrados."); return
+    c_labels, c_map = opciones_clave(contr)
+    o_labels, o_map = opciones_clave(obras)
+    with st.form("form_asignar", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            contr_lbl = st.selectbox("Contratista", c_labels)
+            obra_lbl = st.selectbox("Obra a asignar", o_labels)
+            concepto = st.text_input("Concepto del trabajo")
+        with col2:
+            monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
+            anticipo = st.number_input("Anticipo / pagado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
+            avance = st.slider("% Avance", 0, 100, 0)
+        clave_dup = st.text_input("Clave del Administrador (solo si repites un contratista en la "
+                                  "misma obra para otra partida)", type="password",
+                                  key="asig_dup_clave")
+        asignar = st.form_submit_button("🔗 Asignar a la obra")
+    if asignar and concepto.strip():
+        oid = obra_id_por_nombre(o_map[obra_lbl])
+        nom = c_map[contr_lbl]
+        prev = consultar("SELECT concepto FROM destajos WHERE obra_id=? AND contratista=?",
+                         (oid, nom))
+        permitido = True
+        if not prev.empty:
+            if not verificar_clave_admin(clave_dup):
+                st.error(f"«{nom}» ya está asignado a esta obra. Para asignarle otra partida "
+                         f"se requiere la clave del Administrador.")
+                permitido = False
+            elif mayus(concepto) in [str(x).upper() for x in prev["concepto"].tolist()]:
+                st.error("Ya existe ese mismo concepto para este contratista en la obra. "
+                         "Usa una partida/concepto diferente.")
+                permitido = False
+        if permitido:
+            ejecutar("INSERT INTO destajos(obra_id,contratista,concepto,monto_contratado,"
+                     "pagado,avance,estatus) VALUES(?,?,?,?,?,?,?)",
+                     (oid, nom, mayus(concepto), monto, anticipo, avance, "En proceso"))
+            st.success(f"«{nom}» asignado a «{o_map[obra_lbl]}»."); st.rerun()
+
+
+def _co_contrato(contr):
+    st.markdown("#### 📄 Contrato aprobado del contratista (PDF)")
+    if contr.empty:
+        st.caption("Aún no hay contratistas."); return
+    cc_labels, cc_map = opciones_clave(contr)
+    cc_lbl = st.selectbox("Selecciona el contratista", cc_labels, key="contrato_contr_sel")
+    cc_row = contr[contr["nombre"] == cc_map[cc_lbl]].iloc[0]
+    cc_id = int(cc_row["id"])
+    actual_c = obtener_contrato_contr(cc_id)
+    if actual_c is not None:
+        import base64
+        st.success(f"Contrato cargado: {actual_c['nombre']}  ·  subido el {actual_c['fecha']}")
+        st.download_button("📄 Descargar contrato del contratista",
+                           data=base64.b64decode(actual_c["contenido"]),
+                           file_name=actual_c["nombre"], mime="application/pdf",
+                           key="dl_contrato_contr")
     else:
-        c_labels, c_map = opciones_clave(contr)
-        o_labels, o_map = opciones_clave(obras)
-        with st.form("form_asignar", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                contr_lbl = st.selectbox("Contratista", c_labels)
-                obra_lbl = st.selectbox("Obra a asignar", o_labels)
-                concepto = st.text_input("Concepto del trabajo")
-            with col2:
-                monto = st.number_input("Monto contratado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
-                anticipo = st.number_input("Anticipo / pagado ($ MXN)", min_value=0.0, step=1000.0, format="%.2f")
-                avance = st.slider("% Avance", 0, 100, 0)
-            clave_dup = st.text_input("Clave del Administrador (solo si repites un contratista en la "
-                                      "misma obra para otra partida)", type="password",
-                                      key="asig_dup_clave")
-            asignar = st.form_submit_button("🔗 Asignar a la obra")
-        if asignar and concepto.strip():
-            oid = obra_id_por_nombre(o_map[obra_lbl])
-            nom = c_map[contr_lbl]
-            prev = consultar("SELECT concepto FROM destajos WHERE obra_id=? AND contratista=?",
-                             (oid, nom))
-            permitido = True
-            if not prev.empty:
-                if not verificar_clave_admin(clave_dup):
-                    st.error(f"«{nom}» ya está asignado a esta obra. Para asignarle otra partida "
-                             f"se requiere la clave del Administrador.")
-                    permitido = False
-                elif mayus(concepto) in [str(x).upper() for x in prev["concepto"].tolist()]:
-                    st.error("Ya existe ese mismo concepto para este contratista en la obra. "
-                             "Usa una partida/concepto diferente.")
-                    permitido = False
-            if permitido:
-                ejecutar("INSERT INTO destajos(obra_id,contratista,concepto,monto_contratado,"
-                         "pagado,avance,estatus) VALUES(?,?,?,?,?,?,?)",
-                         (oid, nom, mayus(concepto), monto, anticipo, avance, "En proceso"))
-                st.success(f"«{nom}» asignado a «{o_map[obra_lbl]}»."); st.rerun()
+        st.caption("Este contratista aún no tiene contrato aprobado cargado.")
+    pdf_cc = st.file_uploader("Cargar / reemplazar contrato aprobado (PDF)",
+                              type=["pdf"], key="up_contrato_contr")
+    if pdf_cc is not None and st.button("💾 Guardar contrato", key="save_contrato_contr"):
+        guardar_contrato_contr(cc_id, pdf_cc)
+        st.success("Contrato aprobado guardado."); st.rerun()
+    link_cc = cc_row["contrato_link"] if "contrato_link" in contr.columns else None
+    st.caption("Opción recomendada para internet: pega un link del contrato "
+               "(Google Drive, Dropbox, etc.). El link no se borra al reiniciarse el servidor.")
+    nuevo_link_cc = st.text_input("Link del contrato (opcional)", value=link_cc or "",
+                                  key="contrato_contr_link_in")
+    if st.button("💾 Guardar link del contrato", key="save_link_contr"):
+        ejecutar("UPDATE contratistas SET contrato_link=? WHERE id=?",
+                 (nuevo_link_cc.strip(), cc_id))
+        st.success("Link del contrato guardado."); st.rerun()
+    if link_cc:
+        st.markdown(f"🔗 [Abrir contrato en el navegador]({link_cc})")
 
-    # ----- Contrato aprobado (PDF) del contratista -----
-    if not contr.empty:
-        st.markdown("---")
-        st.markdown("#### 📄 Contrato aprobado del contratista (PDF)")
-        cc_labels, cc_map = opciones_clave(contr)
-        cc_lbl = st.selectbox("Selecciona el contratista", cc_labels, key="contrato_contr_sel")
-        cc_row = contr[contr["nombre"] == cc_map[cc_lbl]].iloc[0]
-        cc_id = int(cc_row["id"])
-        actual_c = obtener_contrato_contr(cc_id)
-        if actual_c is not None:
-            import base64
-            st.success(f"Contrato cargado: {actual_c['nombre']}  ·  subido el {actual_c['fecha']}")
-            st.download_button("📄 Descargar contrato del contratista",
-                               data=base64.b64decode(actual_c["contenido"]),
-                               file_name=actual_c["nombre"], mime="application/pdf",
-                               key="dl_contrato_contr")
-        else:
-            st.caption("Este contratista aún no tiene contrato aprobado cargado.")
-        pdf_cc = st.file_uploader("Cargar / reemplazar contrato aprobado (PDF)",
-                                  type=["pdf"], key="up_contrato_contr")
-        if pdf_cc is not None and st.button("💾 Guardar contrato", key="save_contrato_contr"):
-            guardar_contrato_contr(cc_id, pdf_cc)
-            st.success("Contrato aprobado guardado."); st.rerun()
-        link_cc = cc_row["contrato_link"] if "contrato_link" in contr.columns else None
-        st.caption("Opción recomendada para internet: pega un link del contrato "
-                   "(Google Drive, Dropbox, etc.). El link no se borra al reiniciarse el servidor.")
-        nuevo_link_cc = st.text_input("Link del contrato (opcional)", value=link_cc or "",
-                                      key="contrato_contr_link_in")
-        if st.button("💾 Guardar link del contrato", key="save_link_contr"):
-            ejecutar("UPDATE contratistas SET contrato_link=? WHERE id=?",
-                     (nuevo_link_cc.strip(), cc_id))
-            st.success("Link del contrato guardado."); st.rerun()
-        if link_cc:
-            st.markdown(f"🔗 [Abrir contrato en el navegador]({link_cc})")
 
-    # ----- Modificar un contratista (botón -> clave -> ventana) -----
-    if puede(rol, "admin") and not contr.empty:
-        st.markdown("---")
-        st.markdown("#### Modificar un contratista")
-        st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
-        if st.button("✏️ Modificar un contratista", key="btn_mod_contr"):
-            st.session_state["ask_contr"] = True
-            st.session_state["open_contr_dlg"] = False
-        if st.session_state.get("ask_contr") and not st.session_state.get("open_contr_dlg"):
-            cl = st.text_input("Clave del Administrador", type="password", key="cl_contr")
-            cc1, cc2 = st.columns(2)
-            if cc1.button("Abrir ventana de edición", key="ok_contr"):
-                if verificar_clave_admin(cl):
-                    st.session_state["open_contr_dlg"] = True
-                    st.session_state["ask_contr"] = False
-                    st.rerun()
-                else:
-                    st.error("Clave del Administrador incorrecta.")
-            if cc2.button("Cancelar", key="cancel_contr_ask"):
+def _co_modificar(rol, contr):
+    st.markdown("#### Modificar un contratista")
+    if not puede(rol, "admin"):
+        st.info("Solo el Administrador puede modificar contratistas."); return
+    if contr.empty:
+        st.caption("Aún no hay contratistas."); return
+    st.caption("Solo el Administrador. Se pedirá su clave antes de abrir la ventana de edición.")
+    if st.button("✏️ Modificar un contratista", key="btn_mod_contr"):
+        st.session_state["ask_contr"] = True
+        st.session_state["open_contr_dlg"] = False
+    if st.session_state.get("ask_contr") and not st.session_state.get("open_contr_dlg"):
+        cl = st.text_input("Clave del Administrador", type="password", key="cl_contr")
+        cc1, cc2 = st.columns(2)
+        if cc1.button("Abrir ventana de edición", key="ok_contr"):
+            if verificar_clave_admin(cl):
+                st.session_state["open_contr_dlg"] = True
                 st.session_state["ask_contr"] = False
                 st.rerun()
-        if st.session_state.get("open_contr_dlg"):
-            dlg_modificar_contratista(contr)
+            else:
+                st.error("Clave del Administrador incorrecta.")
+        if cc2.button("Cancelar", key="cancel_contr_ask"):
+            st.session_state["ask_contr"] = False
+            st.rerun()
+    if st.session_state.get("open_contr_dlg"):
+        dlg_modificar_contratista(contr)
 
 
-def vista_presupuesto(obra_id: int, rol: str):
-    st.subheader("💵 Presupuesto de obra")
-    if not requiere_obra(obra_id):
-        return
+def vista_contratistas(rol: str):
+    st.subheader("👷 Contratistas · Alta y asignación a obra")
+    contr = consultar("SELECT * FROM contratistas ORDER BY nombre")
+    obras = obtener_obras()
+    if puede(rol, "editar"):
+        paneles = ["📋 Registrados", "➕ Registrar nuevo", "🔗 Asignar a obra",
+                   "📄 Contrato (PDF)", "✏️ Modificar"]
+    else:
+        paneles = ["📋 Registrados"]
+    panel = panel_botones("co_panel", paneles)
+    if panel == "📋 Registrados":
+        _co_lista(contr)
+    elif panel == "➕ Registrar nuevo":
+        _co_nuevo()
+    elif panel == "🔗 Asignar a obra":
+        _co_asignar(contr, obras)
+    elif panel == "📄 Contrato (PDF)":
+        _co_contrato(contr)
+    elif panel == "✏️ Modificar":
+        _co_modificar(rol, contr)
+
+
+def _pp_resumen(obra_id):
     pres = consultar("SELECT * FROM presupuesto WHERE obra_id=? ORDER BY partida", (obra_id,))
     k = calcular_kpis(obra_id)
     total_cargado = pres["monto"].sum() if not pres.empty else 0.0
@@ -2651,25 +2769,24 @@ def vista_presupuesto(obra_id: int, rol: str):
     c1.metric("Presupuesto cargado", f"{pesos(total_cargado)}")
     c2.metric("Presupuesto de la obra", f"{pesos(k['presupuesto'])}")
     c3.metric("Ejercido (compras + gastos + destajos)", f"{pesos(ejercido_total)}", f"{pct_ej}%")
-    if not pres.empty:
-        st.plotly_chart(grafica_presupuesto_partidas(pres), width="stretch", key="plt_7")
-        comp = pd.DataFrame({"Concepto": ["Presupuesto cargado", "Ejercido"],
-                             "Monto": [total_cargado, ejercido_total]})
-        comp["_etq"] = comp["Monto"].map(pesos)
-        fig = px.bar(comp, x="Concepto", y="Monto", text="_etq", color="Concepto",
-                     color_discrete_sequence=[COLOR_PRIMARIO, COLOR_ACENTO],
-                     title="Presupuesto cargado vs Ejercido (compras + gastos + destajos)")
-        fig.update_traces(textposition="outside")
-        st.plotly_chart(_mate(fig, 340), width="stretch", key="plt_8")
-        tabla = pres[["partida", "concepto", "monto"]].copy()
-        tabla["monto"] = tabla["monto"].map(lambda x: f"{pesos(x)}")
-        st.dataframe(tabla.rename(columns={"partida": "Partida", "concepto": "Concepto",
-                     "monto": "Monto"}), width="stretch", hide_index=True)
-    else:
-        st.caption("Aún no se ha cargado presupuesto para esta obra.")
-    if not puede(rol, "editar"):
-        st.info("Solo Administrador o Ingeniero pueden cargar presupuesto."); return
-    st.markdown("---")
+    if pres.empty:
+        st.caption("Aún no se ha cargado presupuesto para esta obra."); return
+    st.plotly_chart(grafica_presupuesto_partidas(pres), width="stretch", key="plt_7")
+    comp = pd.DataFrame({"Concepto": ["Presupuesto cargado", "Ejercido"],
+                         "Monto": [total_cargado, ejercido_total]})
+    comp["_etq"] = comp["Monto"].map(pesos)
+    fig = px.bar(comp, x="Concepto", y="Monto", text="_etq", color="Concepto",
+                 color_discrete_sequence=[COLOR_PRIMARIO, COLOR_ACENTO],
+                 title="Presupuesto cargado vs Ejercido (compras + gastos + destajos)")
+    fig.update_traces(textposition="outside")
+    st.plotly_chart(_mate(fig, 340), width="stretch", key="plt_8")
+    tabla = pres[["partida", "concepto", "monto"]].copy()
+    tabla["monto"] = tabla["monto"].map(lambda x: f"{pesos(x)}")
+    st.dataframe(tabla.rename(columns={"partida": "Partida", "concepto": "Concepto",
+                 "monto": "Monto"}), width="stretch", hide_index=True)
+
+
+def _pp_partida(obra_id):
     st.markdown("#### Cargar una partida (manual)")
     with st.form("form_pres", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
@@ -2680,6 +2797,9 @@ def vista_presupuesto(obra_id: int, rol: str):
             ejecutar("INSERT INTO presupuesto(obra_id,partida,concepto,monto) VALUES(?,?,?,?)",
                      (obra_id, partida.strip(), concepto, monto))
             st.success("Partida agregada al presupuesto."); st.rerun()
+
+
+def _pp_pdf(obra_id):
     st.markdown("#### 📄 Cargar el presupuesto aprobado (PDF)")
     actual_pdf = obtener_presupuesto_pdf(obra_id)
     if actual_pdf is not None:
@@ -2687,8 +2807,7 @@ def vista_presupuesto(obra_id: int, rol: str):
         st.success(f"Presupuesto cargado: {actual_pdf['nombre']}  ·  subido el {actual_pdf['fecha']}")
         st.download_button("📄 Descargar presupuesto aprobado",
                            data=base64.b64decode(actual_pdf["contenido"]),
-                           file_name=actual_pdf["nombre"], mime="application/pdf",
-                           key="dl_pres_pdf")
+                           file_name=actual_pdf["nombre"], mime="application/pdf", key="dl_pres_pdf")
     else:
         st.caption("Esta obra aún no tiene presupuesto aprobado cargado.")
     pdf_pres = st.file_uploader("Cargar / reemplazar presupuesto aprobado (PDF)",
@@ -2696,7 +2815,6 @@ def vista_presupuesto(obra_id: int, rol: str):
     if pdf_pres is not None and st.button("💾 Guardar presupuesto (PDF)", key="save_pres_pdf"):
         guardar_presupuesto_pdf(obra_id, pdf_pres)
         st.success("Presupuesto aprobado guardado."); st.rerun()
-
     link_pres = consultar("SELECT presupuesto_link FROM obras WHERE id=?",
                           (obra_id,))["presupuesto_link"].iloc[0]
     st.caption("Opción recomendada para internet: pega un link del presupuesto "
@@ -2710,10 +2828,24 @@ def vista_presupuesto(obra_id: int, rol: str):
         st.markdown(f"🔗 [Abrir presupuesto en el navegador]({link_pres})")
 
 
-def vista_control_financiero(obra_id: int, rol: str):
-    st.subheader("💰 Control financiero de la obra")
+def vista_presupuesto(obra_id: int, rol: str):
+    st.subheader("💵 Presupuesto de obra")
     if not requiere_obra(obra_id):
         return
+    if puede(rol, "editar"):
+        paneles = ["📊 Resumen", "➕ Cargar partida", "📄 Presupuesto PDF"]
+    else:
+        paneles = ["📊 Resumen"]
+    panel = panel_botones("pp_panel", paneles)
+    if panel == "📊 Resumen":
+        _pp_resumen(obra_id)
+    elif panel == "➕ Cargar partida":
+        _pp_partida(obra_id)
+    elif panel == "📄 Presupuesto PDF":
+        _pp_pdf(obra_id)
+
+
+def _cf_resumen(obra_id):
     abonos = consultar("SELECT * FROM abonos WHERE obra_id=? ORDER BY fecha DESC", (obra_id,))
     k = calcular_kpis(obra_id)
     recibido = total_abonos(obra_id)
@@ -2723,22 +2855,20 @@ def vista_control_financiero(obra_id: int, rol: str):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total recibido (abonos)", f"{pesos(recibido)}")
     c2.metric("Egresos (compras + gastos + destajos)", f"{pesos(egresos)}")
-    c3.metric("Balance", f"{pesos(balance)}",
-              "A favor" if balance >= 0 else "En contra")
+    c3.metric("Balance", f"{pesos(balance)}", "A favor" if balance >= 0 else "En contra")
     c4.metric("Saldo por cobrar", f"{pesos(saldo_cobrar)}")
     st.caption(f"Detalle de egresos — Compras: {pesos(k['compras'])} · "
                f"Gastos: {pesos(k['gastos'])} · Destajos: {pesos(k['destajos'])}")
-    if not abonos.empty:
-        tabla = abonos[["fecha", "concepto", "metodo_pago", "monto", "nota"]].copy()
-        tabla["monto"] = tabla["monto"].map(lambda x: f"{pesos(x)}")
-        st.dataframe(tabla.rename(columns={"fecha": "Fecha", "concepto": "Concepto",
-                     "metodo_pago": "Método de pago", "monto": "Monto", "nota": "Nota"}),
-                     width="stretch", hide_index=True)
-    else:
-        st.caption("Aún no hay abonos o pagos registrados para esta obra.")
-    if not puede(rol, "editar"):
-        st.info("Tu rol es de solo lectura."); return
-    st.markdown("---")
+    if abonos.empty:
+        st.caption("Aún no hay abonos o pagos registrados para esta obra."); return
+    tabla = abonos[["fecha", "concepto", "metodo_pago", "monto", "nota"]].copy()
+    tabla["monto"] = tabla["monto"].map(lambda x: f"{pesos(x)}")
+    st.dataframe(tabla.rename(columns={"fecha": "Fecha", "concepto": "Concepto",
+                 "metodo_pago": "Método de pago", "monto": "Monto", "nota": "Nota"}),
+                 width="stretch", hide_index=True)
+
+
+def _cf_registrar(obra_id):
     st.markdown("#### ➕ Registrar un pago o abono recibido")
     with st.form("form_abono", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
@@ -2756,38 +2886,58 @@ def vista_control_financiero(obra_id: int, rol: str):
                      "VALUES(?,?,?,?,?,?)",
                      (obra_id, fecha.isoformat(), mayus(concepto), monto, metodo, mayus(nota)))
             st.success(f"Abono de {pesos(monto)} registrado."); st.rerun()
-    if not abonos.empty:
-        st.markdown("#### 🗑️ Eliminar un abono")
-        op = {f"{r['fecha']} · {r['concepto']} · {pesos(r['monto'])}": int(r["id"])
-              for _, r in abonos.iterrows()}
-        sel = st.selectbox("Selecciona el abono a eliminar", list(op.keys()), key="del_abono_sel")
-        if st.button("Eliminar abono seleccionado", key="del_abono_btn"):
-            ejecutar("DELETE FROM abonos WHERE id=?", (op[sel],))
-            st.success("Abono eliminado."); st.rerun()
 
 
-def vista_requisiciones(obra_id: int, rol: str, usuario: str):
-    st.subheader("📦 Requisiciones de materiales")
+def _cf_eliminar(obra_id):
+    st.markdown("#### 🗑️ Eliminar un abono")
+    abonos = consultar("SELECT * FROM abonos WHERE obra_id=? ORDER BY fecha DESC", (obra_id,))
+    if abonos.empty:
+        st.caption("No hay abonos para eliminar."); return
+    op = {f"{r['fecha']} · {r['concepto']} · {pesos(r['monto'])}": int(r["id"])
+          for _, r in abonos.iterrows()}
+    sel = st.selectbox("Selecciona el abono a eliminar", list(op.keys()), key="del_abono_sel")
+    if st.button("Eliminar abono seleccionado", key="del_abono_btn"):
+        ejecutar("DELETE FROM abonos WHERE id=?", (op[sel],))
+        st.success("Abono eliminado."); st.rerun()
+
+
+def vista_control_financiero(obra_id: int, rol: str):
+    st.subheader("💰 Control financiero de la obra")
     if not requiere_obra(obra_id):
         return
-    reqs = consultar("SELECT * FROM requisiciones WHERE obra_id=? ORDER BY fecha DESC", (obra_id,))
-    if not reqs.empty:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Requisiciones", len(reqs))
-        c2.metric("Pendientes", int((reqs["estatus"] == "Solicitada").sum()))
-        c3.metric("Costo estimado", f"{pesos(reqs['costo_estimado'].sum())}")
-        tabla = reqs[["folio", "fecha", "material", "cantidad", "unidad", "proveedor",
-                      "costo_estimado", "estatus"]].copy()
-        tabla["costo_estimado"] = tabla["costo_estimado"].map(lambda x: f"{pesos(x)}")
-        st.dataframe(tabla.rename(columns={"folio": "Folio", "fecha": "Fecha",
-                     "material": "Material", "cantidad": "Cant.", "unidad": "Unidad",
-                     "proveedor": "Proveedor", "costo_estimado": "Costo est.",
-                     "estatus": "Estatus"}), width="stretch", hide_index=True)
+    if puede(rol, "editar"):
+        paneles = ["📊 Resumen", "➕ Registrar abono", "🗑️ Eliminar abono"]
     else:
-        st.caption("No hay requisiciones para esta obra todavía.")
-    if not puede(rol, "editar"):
-        st.info("Tu rol es de solo lectura."); return
+        paneles = ["📊 Resumen"]
+    panel = panel_botones("cf_panel", paneles)
+    if panel == "📊 Resumen":
+        _cf_resumen(obra_id)
+    elif panel == "➕ Registrar abono":
+        _cf_registrar(obra_id)
+    elif panel == "🗑️ Eliminar abono":
+        _cf_eliminar(obra_id)
+
+
+def _rq_listado(obra_id):
+    reqs = consultar("SELECT * FROM requisiciones WHERE obra_id=? ORDER BY fecha DESC", (obra_id,))
+    if reqs.empty:
+        st.caption("No hay requisiciones para esta obra todavía."); return
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Requisiciones", len(reqs))
+    c2.metric("Pendientes", int((reqs["estatus"] == "Solicitada").sum()))
+    c3.metric("Costo estimado", f"{pesos(reqs['costo_estimado'].sum())}")
+    tabla = reqs[["folio", "fecha", "material", "cantidad", "unidad", "proveedor",
+                  "costo_estimado", "estatus"]].copy()
+    tabla["costo_estimado"] = tabla["costo_estimado"].map(lambda x: f"{pesos(x)}")
+    st.dataframe(tabla.rename(columns={"folio": "Folio", "fecha": "Fecha",
+                 "material": "Material", "cantidad": "Cant.", "unidad": "Unidad",
+                 "proveedor": "Proveedor", "costo_estimado": "Costo est.",
+                 "estatus": "Estatus"}), width="stretch", hide_index=True)
+
+
+def _rq_nueva(obra_id, usuario):
     st.markdown("#### Nueva requisición")
+    reqs = consultar("SELECT * FROM requisiciones WHERE obra_id=?", (obra_id,))
     cat_prov = obtener_proveedores()
     rp_labels, rp_map = opciones_clave(cat_prov) if not cat_prov.empty else ([], {})
     with st.form("form_req", clear_on_submit=True):
@@ -2814,40 +2964,69 @@ def vista_requisiciones(obra_id: int, rol: str, usuario: str):
                      (obra_id, mayus(folio), HOY.isoformat(), usuario, mayus(material), cantidad,
                       mayus(unidad), proveedor, costo, "Solicitada", prioridad, metodo_req))
             st.success("Requisición registrada."); st.rerun()
-    if not reqs.empty:
-        st.markdown("#### Actualizar estatus / prioridad de una requisición")
-        with st.form("form_req_estatus"):
-            folio_sel = st.selectbox("Folio", reqs["folio"].tolist())
-            cse1, cse2, cse3 = st.columns(3)
-            with cse1:
-                nuevo = st.selectbox("Nuevo estatus", ESTATUS_REQ)
-            with cse2:
-                nueva_prio = st.selectbox("Prioridad", PRIORIDAD_REQ)
-            with cse3:
-                nuevo_metodo = st.selectbox("Método de pago", METODOS_PAGO_REQ)
-            if st.form_submit_button("💾 Actualizar"):
-                ejecutar("UPDATE requisiciones SET estatus=?, prioridad=?, metodo_pago=? "
-                         "WHERE obra_id=? AND folio=?",
-                         (nuevo, nueva_prio, nuevo_metodo, obra_id, folio_sel))
-                st.success(f"Requisición {folio_sel} → {nuevo} · {nueva_prio}."); st.rerun()
 
-        st.markdown("#### 📤 Enviar requisición (PDF / WhatsApp / correo)")
-        folio_wa = st.selectbox("Requisición a enviar", reqs["folio"].tolist(), key="wa_folio")
-        row = reqs[reqs["folio"] == folio_wa].iloc[0]
-        rid = int(row["id"])
-        if FPDF_OK:
-            st.download_button("⬇️ Descargar PDF", data=pdf_requisicion(rid),
-                               file_name=f"{folio_wa}.pdf", mime="application/pdf", key="reqpdf")
-            resumen = (f"Requisición {row['folio']} - Obra: "
-                       f"{consultar('SELECT nombre FROM obras WHERE id=?', (obra_id,))['nombre'].iloc[0]}\n"
-                       f"Material: {row['material']} ({row['cantidad']} {row['unidad']})\n"
-                       f"Proveedor: {row['proveedor'] or 'N/D'}\n"
-                       f"Costo estimado: {pesos(row['costo_estimado'])}\n"
-                       f"Estatus: {row['estatus']}")
-            bloque_enviar_reporte(pdf_requisicion(rid), f"Requisicion {row['folio']}",
-                                  f"{folio_wa}.pdf", resumen, "req")
-        else:
-            st.caption("Para el PDF instala una vez: python -m pip install fpdf2")
+
+def _rq_estatus(obra_id):
+    st.markdown("#### Actualizar estatus / prioridad de una requisición")
+    reqs = consultar("SELECT * FROM requisiciones WHERE obra_id=? ORDER BY fecha DESC", (obra_id,))
+    if reqs.empty:
+        st.caption("No hay requisiciones."); return
+    with st.form("form_req_estatus"):
+        folio_sel = st.selectbox("Folio", reqs["folio"].tolist())
+        cse1, cse2, cse3 = st.columns(3)
+        with cse1:
+            nuevo = st.selectbox("Nuevo estatus", ESTATUS_REQ)
+        with cse2:
+            nueva_prio = st.selectbox("Prioridad", PRIORIDAD_REQ)
+        with cse3:
+            nuevo_metodo = st.selectbox("Método de pago", METODOS_PAGO_REQ)
+        if st.form_submit_button("💾 Actualizar"):
+            ejecutar("UPDATE requisiciones SET estatus=?, prioridad=?, metodo_pago=? "
+                     "WHERE obra_id=? AND folio=?",
+                     (nuevo, nueva_prio, nuevo_metodo, obra_id, folio_sel))
+            st.success(f"Requisición {folio_sel} → {nuevo} · {nueva_prio}."); st.rerun()
+
+
+def _rq_enviar(obra_id):
+    st.markdown("#### 📤 Enviar requisición (PDF / WhatsApp / correo)")
+    reqs = consultar("SELECT * FROM requisiciones WHERE obra_id=? ORDER BY fecha DESC", (obra_id,))
+    if reqs.empty:
+        st.caption("No hay requisiciones."); return
+    folio_wa = st.selectbox("Requisición a enviar", reqs["folio"].tolist(), key="wa_folio")
+    row = reqs[reqs["folio"] == folio_wa].iloc[0]
+    rid = int(row["id"])
+    if FPDF_OK:
+        st.download_button("⬇️ Descargar PDF", data=pdf_requisicion(rid),
+                           file_name=f"{folio_wa}.pdf", mime="application/pdf", key="reqpdf")
+        resumen = (f"Requisición {row['folio']} - Obra: "
+                   f"{consultar('SELECT nombre FROM obras WHERE id=?', (obra_id,))['nombre'].iloc[0]}\n"
+                   f"Material: {row['material']} ({row['cantidad']} {row['unidad']})\n"
+                   f"Proveedor: {row['proveedor'] or 'N/D'}\n"
+                   f"Costo estimado: {pesos(row['costo_estimado'])}\n"
+                   f"Estatus: {row['estatus']}")
+        bloque_enviar_reporte(pdf_requisicion(rid), f"Requisicion {row['folio']}",
+                              f"{folio_wa}.pdf", resumen, "req")
+    else:
+        st.caption("Para el PDF instala una vez: python -m pip install fpdf2")
+
+
+def vista_requisiciones(obra_id: int, rol: str, usuario: str):
+    st.subheader("📦 Requisiciones de materiales")
+    if not requiere_obra(obra_id):
+        return
+    if puede(rol, "editar"):
+        paneles = ["📋 Listado", "➕ Nueva", "🔄 Estatus / prioridad", "📤 Enviar (PDF)"]
+    else:
+        paneles = ["📋 Listado"]
+    panel = panel_botones("rq_panel", paneles)
+    if panel == "📋 Listado":
+        _rq_listado(obra_id)
+    elif panel == "➕ Nueva":
+        _rq_nueva(obra_id, usuario)
+    elif panel == "🔄 Estatus / prioridad":
+        _rq_estatus(obra_id)
+    elif panel == "📤 Enviar (PDF)":
+        _rq_enviar(obra_id)
 
 
 def _dz_resumen(obra_id, dest):
@@ -3293,67 +3472,63 @@ def vista_destajos(obra_id: int, rol: str):
         _dz_borrar(obra_id, dest)
 
 
-def vista_avances(obra_id: int, rol: str, usuario: str):
-    st.subheader("📝 Avances y bitácora")
-    if not requiere_obra(obra_id):
-        return
-    if not puede(rol, "editar"):
-        st.info("Tu rol (Cliente) es de solo lectura.")
+def _av_avance(obra_id, rol):
+    st.markdown("#### Avance de partidas")
     pres = consultar("SELECT * FROM presupuesto WHERE obra_id=? ORDER BY partida, id", (obra_id,))
+    if pres.empty:
+        st.info("Aún no hay partidas. Captúralas en la sección «Presupuesto» "
+                "(Cargar una partida) y aquí aparecerán para actualizar su avance."); return
     if puede(rol, "editar"):
-        st.markdown("#### Actualizar avance de una partida")
-        if pres.empty:
-            st.info("Aún no hay partidas. Captúralas en la sección «Presupuesto» "
-                    "(Cargar una partida) y aquí aparecerán para actualizar su avance.")
-        else:
-            etqs, ids = [], []
-            for i, (_, rp) in enumerate(pres.iterrows()):
-                e = str(rp["partida"] or "").strip()
-                if rp["concepto"]:
-                    e = f"{e} · {rp['concepto']}" if e else str(rp["concepto"])
-                etqs.append(f"{i + 1}. {e or 'Partida'}")
-                ids.append(int(rp["id"]))
-            with st.form("form_avance"):
-                sel = st.selectbox("Partida del presupuesto", etqs)
-                pid = ids[etqs.index(sel)]
-                fila = pres[pres["id"] == pid].iloc[0]
-                av_act = int(fila["avance"]) if "avance" in pres.columns and pd.notna(fila["avance"]) else 0
-                nuevo = st.slider("% de avance", 0, 100, av_act)
-                est_op = ["Por iniciar", "En proceso", "Completada"]
-                est_act = fila["estado"] if "estado" in pres.columns and fila["estado"] in est_op else "Por iniciar"
-                estado = st.selectbox("Estado", est_op, index=est_op.index(est_act))
-                obra_row = consultar("SELECT fecha_inicio,fecha_fin FROM obras WHERE id=?",
-                                     (obra_id,)).iloc[0]
+        etqs, ids = [], []
+        for i, (_, rp) in enumerate(pres.iterrows()):
+            e2 = str(rp["partida"] or "").strip()
+            if rp["concepto"]:
+                e2 = f"{e2} · {rp['concepto']}" if e2 else str(rp["concepto"])
+            etqs.append(f"{i + 1}. {e2 or 'Partida'}")
+            ids.append(int(rp["id"]))
+        with st.form("form_avance"):
+            sel = st.selectbox("Partida del presupuesto", etqs)
+            pid = ids[etqs.index(sel)]
+            fila = pres[pres["id"] == pid].iloc[0]
+            av_act = int(fila["avance"]) if "avance" in pres.columns and pd.notna(fila["avance"]) else 0
+            nuevo = st.slider("% de avance", 0, 100, av_act)
+            est_op = ["Por iniciar", "En proceso", "Completada"]
+            est_act = fila["estado"] if "estado" in pres.columns and fila["estado"] in est_op else "Por iniciar"
+            estado = st.selectbox("Estado", est_op, index=est_op.index(est_act))
+            obra_row = consultar("SELECT fecha_inicio,fecha_fin FROM obras WHERE id=?",
+                                 (obra_id,)).iloc[0]
 
-                def _fch(v, fb):
+            def _fch(v, fb):
+                try:
+                    return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+                except Exception:
                     try:
-                        return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+                        return datetime.strptime(str(fb)[:10], "%Y-%m-%d").date()
                     except Exception:
-                        try:
-                            return datetime.strptime(str(fb)[:10], "%Y-%m-%d").date()
-                        except Exception:
-                            return HOY
-                cci, ccf = st.columns(2)
-                with cci:
-                    f_ini = st.date_input("Fecha de inicio (para el cronograma)",
-                                          _fch(fila.get("fecha_inicio"), obra_row["fecha_inicio"]))
-                with ccf:
-                    f_fin = st.date_input("Fecha de término (para el cronograma)",
-                                          _fch(fila.get("fecha_fin"), obra_row["fecha_fin"]))
-                if st.form_submit_button("💾 Guardar avance"):
-                    ejecutar("UPDATE presupuesto SET avance=?, estado=?, fecha_inicio=?, "
-                             "fecha_fin=? WHERE id=?",
-                             (nuevo, estado, f_ini.isoformat(), f_fin.isoformat(), pid))
-                    st.success(f"Partida «{sel}» → {nuevo}%."); st.rerun()
-            tabla_av = pres.copy()
-            if "avance" in tabla_av.columns:
-                tabla_av["avance"] = tabla_av["avance"].fillna(0).map(lambda x: f"{int(x)}%")
-            cols_av = ["partida", "concepto", "avance", "estado"]
-            cols_av = [c for c in cols_av if c in tabla_av.columns]
-            st.dataframe(tabla_av[cols_av].rename(columns={"partida": "Partida",
-                         "concepto": "Concepto", "avance": "% Avance", "estado": "Estado"}),
-                         width="stretch", hide_index=True)
-        st.markdown("---")
+                        return HOY
+            cci, ccf = st.columns(2)
+            with cci:
+                f_ini = st.date_input("Fecha de inicio (para el cronograma)",
+                                      _fch(fila.get("fecha_inicio"), obra_row["fecha_inicio"]))
+            with ccf:
+                f_fin = st.date_input("Fecha de término (para el cronograma)",
+                                      _fch(fila.get("fecha_fin"), obra_row["fecha_fin"]))
+            if st.form_submit_button("💾 Guardar avance"):
+                ejecutar("UPDATE presupuesto SET avance=?, estado=?, fecha_inicio=?, "
+                         "fecha_fin=? WHERE id=?",
+                         (nuevo, estado, f_ini.isoformat(), f_fin.isoformat(), pid))
+                st.success(f"Partida «{sel}» → {nuevo}%."); st.rerun()
+    tabla_av = pres.copy()
+    if "avance" in tabla_av.columns:
+        tabla_av["avance"] = tabla_av["avance"].fillna(0).map(lambda x: f"{int(x)}%")
+    cols_av = ["partida", "concepto", "avance", "estado"]
+    cols_av = [c for c in cols_av if c in tabla_av.columns]
+    st.dataframe(tabla_av[cols_av].rename(columns={"partida": "Partida",
+                 "concepto": "Concepto", "avance": "% Avance", "estado": "Estado"}),
+                 width="stretch", hide_index=True)
+
+
+def _av_bitacora(obra_id, rol, usuario):
     if puede(rol, "editar"):
         st.markdown("#### Nueva nota de bitácora")
         with st.form("form_bit", clear_on_submit=True):
@@ -3371,6 +3546,19 @@ def vista_avances(obra_id: int, rol: str, usuario: str):
     else:
         st.dataframe(bit.rename(columns={"fecha": "Fecha", "autor": "Autor", "nota": "Nota"}),
                      width="stretch", hide_index=True)
+
+
+def vista_avances(obra_id: int, rol: str, usuario: str):
+    st.subheader("📝 Avances y bitácora")
+    if not requiere_obra(obra_id):
+        return
+    if not puede(rol, "editar"):
+        st.info("Tu rol (Cliente) es de solo lectura.")
+    panel = panel_botones("av_panel", ["📈 Avance de partidas", "📓 Bitácora"])
+    if panel == "📈 Avance de partidas":
+        _av_avance(obra_id, rol)
+    elif panel == "📓 Bitácora":
+        _av_bitacora(obra_id, rol, usuario)
 
 
 # =============================================================================
