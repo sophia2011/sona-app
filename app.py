@@ -1567,6 +1567,9 @@ def pdf_pagos_semana(obra_id: int, observaciones: str = "") -> bytes:
     _pdf_parrafo(pdf, f"Generado por {EMPRESA} - {HOY.isoformat()}", size=9,
                  color=(122, 118, 110))
     return bytes(pdf.output())
+
+
+def pdf_pagos_programados(obra_id: int, ids=None) -> bytes:
     """Listado de pagos programados con todos los datos bancarios del contratista."""
     o = consultar("SELECT nombre,codigo FROM obras WHERE id=?", (obra_id,))
     on = o["nombre"].iloc[0] if not o.empty else ""
