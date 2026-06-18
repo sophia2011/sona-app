@@ -137,7 +137,7 @@ PRIORIDAD_REQ = ["Normal", "Urgente", "En espera"]
 METODOS_PAGO_REQ = ["Efectivo", "Transferencia", "Depósito", "Tarjeta de débito",
                     "Tarjeta de crédito"]
 PRIORIDAD_PAGO = ["Alta", "Media", "Baja"]
-ESTATUS_PAGO = ["Pendiente", "Pagado"]
+ESTATUS_PAGO = ["Por pagar", "Pagado", "Detenido", "Cancelado"]
 TIPO_CLIENTE = ["Prospecto", "Activo", "Cerrado"]
 METODOS_PAGO = ["Efectivo", "Transferencia", "Tarjeta de débito", "Tarjeta de crédito"]
 
@@ -200,6 +200,19 @@ def ejecutar(sql: str, params: tuple = ()) -> None:
     finally:
         conn.close()
     _marcar_cambio(sql)
+
+
+def ejecutar_id(sql: str, params: tuple = ()) -> int:
+    """Como ejecutar(), pero devuelve el id de la fila insertada."""
+    conn = get_conn()
+    try:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        rid = cur.lastrowid
+    finally:
+        conn.close()
+    _marcar_cambio(sql)
+    return rid
 
 
 def _marcar_cambio(sql: str) -> None:
@@ -392,8 +405,9 @@ def crear_tablas() -> None:
         CREATE TABLE IF NOT EXISTS prog_pagos(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             obra_id INTEGER, destajo_id INTEGER, contratista TEXT, concepto TEXT,
-            semana TEXT, monto REAL, prioridad TEXT, estatus TEXT DEFAULT 'Pendiente',
-            fecha_pago TEXT, metodo_pago TEXT, datos_bancarios TEXT, banco_beneficiario TEXT);
+            semana TEXT, monto REAL, prioridad TEXT, estatus TEXT DEFAULT 'Por pagar',
+            fecha_pago TEXT, metodo_pago TEXT, datos_bancarios TEXT, banco_beneficiario TEXT,
+            aplicado INTEGER DEFAULT 0, pago_id INTEGER);
     """)
     # Migración: agrega la columna 'codigo' (clave de identificación) si falta
     for tabla in ["obras", "contratistas", "proveedores", "usuarios"]:
@@ -453,6 +467,15 @@ def crear_tablas() -> None:
             conn.execute(f"ALTER TABLE presupuesto ADD COLUMN {col} {deff}")
         except Exception:
             pass
+    for col, deff in [("aplicado", "INTEGER DEFAULT 0"), ("pago_id", "INTEGER")]:
+        try:
+            conn.execute(f"ALTER TABLE prog_pagos ADD COLUMN {col} {deff}")
+        except Exception:
+            pass
+    try:
+        conn.execute("UPDATE prog_pagos SET estatus='Por pagar' WHERE estatus='Pendiente'")
+    except Exception:
+        pass
     for col in ["metodo_pago", "datos_bancarios", "banco_beneficiario"]:
         try:
             conn.execute(f"ALTER TABLE destajos ADD COLUMN {col} TEXT")
@@ -806,15 +829,20 @@ def control_contratista(nombre):
 
 
 def datos_contratista(nombre):
-    """Devuelve los datos bancarios del contratista, tal como se dieron de alta."""
-    df = consultar("SELECT beneficiario,banco,cuenta,clabe,tarjeta,telefono,correo "
-                   "FROM contratistas WHERE nombre=?", (nombre,))
-    campos = ["beneficiario", "banco", "cuenta", "clabe", "tarjeta", "telefono", "correo"]
+    """Devuelve TODOS los datos del contratista, tal como se dieron de alta."""
+    df = consultar("SELECT codigo,especialidad,beneficiario,banco,cuenta,clabe,tarjeta,"
+                   "telefono,correo,monto_contratado FROM contratistas WHERE nombre=?", (nombre,))
+    txt = ["codigo", "especialidad", "beneficiario", "banco", "cuenta", "clabe",
+           "tarjeta", "telefono", "correo"]
     if df.empty:
-        return {c: "" for c in campos}
+        d = {c: "" for c in txt}
+        d["monto_contratado"] = 0.0
+        return d
     r = df.iloc[0]
-    return {c: (str(r[c]) if (c in df.columns and pd.notna(r[c]) and str(r[c]).strip()) else "")
-            for c in campos}
+    d = {c: (str(r[c]) if (c in df.columns and pd.notna(r[c]) and str(r[c]).strip()) else "")
+         for c in txt}
+    d["monto_contratado"] = float(r["monto_contratado"] or 0) if "monto_contratado" in df.columns else 0.0
+    return d
 
 
 def guardar_presupuesto_pdf(obra_id, archivo):
@@ -1493,7 +1521,7 @@ def pdf_destajos_desglose(obra_id: int) -> bytes:
     return bytes(pdf.output())
 
 
-def pdf_pagos_semana(obra_id: int) -> bytes:
+def pdf_pagos_semana(obra_id: int, observaciones: str = "") -> bytes:
     """Reporte semanal: suma de todos los destajos por pagar de la obra."""
     o = consultar("SELECT nombre,codigo FROM obras WHERE id=?", (obra_id,))
     on = o["nombre"].iloc[0] if not o.empty else ""
@@ -1530,12 +1558,15 @@ def pdf_pagos_semana(obra_id: int) -> bytes:
     _pdf_parrafo(pdf, f"TOTAL A PAGAR: {pesos(total)} MXN", size=15, bold=True,
                  color=PDF_PRIMARY)
     pdf.ln(2)
+    _pdf_titulo(pdf, "Observaciones / indicaciones a Contabilidad")
+    if observaciones and observaciones.strip():
+        _pdf_parrafo(pdf, observaciones.strip())
+    else:
+        _pdf_parrafo(pdf, "Sin observaciones.")
+    pdf.ln(2)
     _pdf_parrafo(pdf, f"Generado por {EMPRESA} - {HOY.isoformat()}", size=9,
                  color=(122, 118, 110))
     return bytes(pdf.output())
-
-
-def pdf_pagos_programados(obra_id: int, ids=None) -> bytes:
     """Listado de pagos programados con todos los datos bancarios del contratista."""
     o = consultar("SELECT nombre,codigo FROM obras WHERE id=?", (obra_id,))
     on = o["nombre"].iloc[0] if not o.empty else ""
@@ -1568,12 +1599,16 @@ def pdf_pagos_programados(obra_id: int, ids=None) -> bytes:
                       ("Prioridad", _t(r["prioridad"])),
                       ("Estatus", _t(r["estatus"])),
                       ("Monto a pagar", f"{pesos(monto)} MXN"),
+                      ("Clave del contratista", _t(b["codigo"])),
+                      ("Especialidad", _t(b["especialidad"])),
+                      ("Monto contratado", f"{pesos(b['monto_contratado'])} MXN"),
                       ("Beneficiario", _t(b["beneficiario"])),
                       ("Banco", _t(b["banco"])),
                       ("No. de cuenta", _t(b["cuenta"])),
                       ("CLABE interbancaria", _t(b["clabe"])),
                       ("No. de tarjeta", _t(b["tarjeta"])),
-                      ("Telefono", _t(b["telefono"]))])
+                      ("Telefono", _t(b["telefono"])),
+                      ("Correo", _t(b["correo"]))])
         pdf.ln(1)
     if prog.empty:
         _pdf_parrafo(pdf, "No hay pagos programados.")
@@ -2851,9 +2886,13 @@ def vista_destajos(obra_id: int, rol: str):
 
         st.markdown("#### 📄 Reporte semanal de pagos")
         st.caption("Suma de todos los destajos por pagar de esta obra, con datos de la empresa y logo.")
+        obs_sem = st.text_area("Observaciones / indicaciones a Contabilidad",
+                               placeholder="Cualquier detalle antes de pagar o indicaciones "
+                               "al departamento de contabilidad (opcional).",
+                               key="obs_reporte_sem")
         if FPDF_OK:
             st.download_button("📄 Descargar reporte semanal (PDF)",
-                               data=pdf_pagos_semana(obra_id),
+                               data=pdf_pagos_semana(obra_id, obs_sem),
                                file_name=f"Pagos_semana_{HOY.isoformat()}.pdf",
                                mime="application/pdf", key="pdf_pagos_sem")
             st.download_button("📑 Descargar reporte de destajos desglosados (PDF)",
@@ -2862,7 +2901,7 @@ def vista_destajos(obra_id: int, rol: str):
                                mime="application/pdf", key="pdf_dest_desglose")
             resumen_p = (f"Reporte semanal de pagos a destajos\n"
                          f"Obra activa - {EMPRESA} - {HOY.isoformat()}")
-            bloque_enviar_reporte(pdf_pagos_semana(obra_id), "Reporte semanal de pagos",
+            bloque_enviar_reporte(pdf_pagos_semana(obra_id, obs_sem), "Reporte semanal de pagos",
                                   f"Pagos_semana_{HOY.isoformat()}.pdf", resumen_p, "pagos")
         else:
             st.caption("Para el PDF instala una vez: python -m pip install fpdf2")
@@ -2977,7 +3016,8 @@ def vista_destajos(obra_id: int, rol: str):
         cap = float(drow["monto_contratado"] or 0)
         pagado = float(drow["pagado"] or 0)
         pend_dest = consultar("SELECT COALESCE(SUM(monto),0) s FROM prog_pagos WHERE "
-                              "destajo_id=? AND estatus='Pendiente'", (pid,))["s"].iloc[0]
+                              "destajo_id=? AND estatus IN ('Por pagar','Pendiente')",
+                              (pid,))["s"].iloc[0]
         st.markdown(
             f"**Datos de pago del contratista (como se dieron de alta):**  \n"
             f"Beneficiario: {b['beneficiario'] or '—'}  ·  Banco: {b['banco'] or '—'}  ·  "
@@ -3008,7 +3048,7 @@ def vista_destajos(obra_id: int, rol: str):
                     ejecutar("INSERT INTO prog_pagos(obra_id,destajo_id,contratista,concepto,"
                              "semana,monto,prioridad,estatus) VALUES(?,?,?,?,?,?,?,?)",
                              (obra_id, pid, drow["contratista"], drow["concepto"],
-                              semana_de(semana.isoformat()), monto_p, prioridad, "Pendiente"))
+                              semana_de(semana.isoformat()), monto_p, prioridad, "Por pagar"))
                     msg = f"Pago programado: {pesos(monto_p)} · prioridad {prioridad}."
                     if excede:
                         msg += " (AUTORIZADO por el Administrador: rebasa lo contratado)"
@@ -3028,11 +3068,11 @@ def vista_destajos(obra_id: int, rol: str):
                          "estatus": "Estatus", "beneficiario": "Beneficiario", "banco": "Banco",
                          "cuenta": "Cuenta", "clabe": "CLABE", "tarjeta": "Tarjeta"}),
                          width="stretch", hide_index=True)
-            pend = prog[prog["estatus"] == "Pendiente"]
+            pend = prog[prog["estatus"].isin(["Por pagar", "Pendiente"])]
             tot_pend = float(pend["monto"].sum()) if not pend.empty else 0.0
             tot_pag = float(prog[prog["estatus"] == "Pagado"]["monto"].sum())
             cpp1, cpp2 = st.columns(2)
-            cpp1.metric("Programado pendiente", f"{pesos(tot_pend)}")
+            cpp1.metric("Programado por pagar", f"{pesos(tot_pend)}")
             cpp2.metric("Programado ya pagado", f"{pesos(tot_pag)}")
 
             # Listado en PDF de los pagos programados
@@ -3051,67 +3091,88 @@ def vista_destajos(obra_id: int, rol: str):
             bloque_enviar_reporte(pdf_prog, "Pagos programados", "pagos_programados.pdf",
                                   resumen_prog, "progpago")
 
-            if not pend.empty:
-                st.markdown("##### ✅ Marcar un pago programado como PAGADO")
-                st.caption("Al marcarlo como pagado, el monto se carga al destajo y queda "
-                           "registrado como anticipo.")
-                opc_pp = [(f"{r['semana']} · {r['contratista']} · {r['concepto']} · "
-                           f"{pesos(r['monto'])} ({r['prioridad']})", int(r["id"]))
-                          for _, r in pend.iterrows()]
-                with st.form("form_marcar_pagado"):
-                    selpp = st.selectbox("Pago programado pendiente", [e for e, _ in opc_pp])
-                    ppid = dict(opc_pp)[selpp]
-                    cm1, cm2 = st.columns(2)
-                    with cm1:
-                        f_pago = st.date_input("Fecha de pago", HOY, key="mp_fecha")
-                        metodo_mp = st.selectbox("Método de pago", METODOS_PAGO, key="mp_metodo")
-                    with cm2:
-                        datos_mp = st.text_input("No. tarjeta / CLABE / No. cuenta", key="mp_datos")
-                        banco_mp = st.text_input("Banco y nombre del beneficiario", key="mp_banco")
-                    clave_mp = st.text_input("Clave del Administrador (solo si rebasa lo "
-                                             "contratado)", type="password", key="mp_clave")
-                    marcar = st.form_submit_button("✅ Marcar como PAGADO")
-                if marcar:
-                    pr = consultar("SELECT * FROM prog_pagos WHERE id=?", (ppid,)).iloc[0]
-                    did2 = int(pr["destajo_id"])
-                    monto_pp = float(pr["monto"] or 0)
-                    drow = consultar("SELECT contratista,concepto,pagado,monto_contratado "
-                                     "FROM destajos WHERE id=?", (did2,))
-                    if drow.empty:
-                        st.error("El destajo de este pago ya no existe.")
+            st.markdown("##### 🔄 Actualizar estatus de un pago programado")
+            st.caption("Estatus: Por pagar · Pagado · Detenido · Cancelado. Solo cuando lo "
+                       "marcas como PAGADO el monto se suma automáticamente al acumulado de "
+                       "pagos del contratista (y se registra como anticipo).")
+            opc_pp = [(f"{r['semana']} · {r['contratista']} · {r['concepto']} · "
+                       f"{pesos(r['monto'])} ({r['prioridad']}) [{r['estatus']}]", int(r["id"]))
+                      for _, r in prog.iterrows()]
+            selpp = st.selectbox("Pago programado", [e for e, _ in opc_pp], key="mp_sel")
+            ppid = dict(opc_pp)[selpp]
+            pr_sel = prog[prog["id"] == ppid].iloc[0]
+            est_act = pr_sel["estatus"] if pr_sel["estatus"] in ESTATUS_PAGO else "Por pagar"
+            with st.form("form_estatus_pago"):
+                nuevo_est = st.selectbox("Estatus de pago", ESTATUS_PAGO,
+                                         index=ESTATUS_PAGO.index(est_act))
+                cm1, cm2 = st.columns(2)
+                with cm1:
+                    f_pago = st.date_input("Fecha de pago (si es Pagado)", HOY, key="mp_fecha")
+                with cm2:
+                    metodo_mp = st.selectbox("Método de pago (si es Pagado)", METODOS_PAGO,
+                                             key="mp_metodo")
+                clave_mp = st.text_input("Clave del Administrador (solo si rebasa lo contratado)",
+                                         type="password", key="mp_clave")
+                actualizar = st.form_submit_button("💾 Actualizar estatus")
+            if actualizar:
+                pr = consultar("SELECT * FROM prog_pagos WHERE id=?", (ppid,)).iloc[0]
+                did2 = int(pr["destajo_id"])
+                monto_pp = float(pr["monto"] or 0)
+                aplicado = int(pr["aplicado"] or 0) if "aplicado" in prog.columns else \
+                    (1 if pr["estatus"] == "Pagado" else 0)
+                drow2 = consultar("SELECT contratista,concepto,pagado,monto_contratado "
+                                  "FROM destajos WHERE id=?", (did2,))
+                if drow2.empty:
+                    st.error("El destajo de este pago ya no existe.")
+                elif nuevo_est == "Pagado" and not aplicado:
+                    d2 = drow2.iloc[0]
+                    actual = float(d2["pagado"] or 0)
+                    cap2 = float(d2["monto_contratado"] or 0)
+                    nuevo_total = actual + monto_pp
+                    excede = cap2 > 0 and nuevo_total > cap2 + 0.009
+                    if excede and not verificar_clave_admin(clave_mp):
+                        st.error(f"⚠️ PRESUPUESTO EXCEDIDO. El acumulado sería "
+                                 f"{pesos(nuevo_total)}, que supera lo contratado "
+                                 f"({pesos(cap2)}). No se marcó como pagado. Para autorizarlo, "
+                                 f"captura la clave del Administrador.")
                     else:
-                        drow = drow.iloc[0]
-                        actual = float(drow["pagado"] or 0)
-                        cap = float(drow["monto_contratado"] or 0)
-                        nuevo_total = actual + monto_pp
-                        excede = cap > 0 and nuevo_total > cap + 0.009
-                        if excede and not verificar_clave_admin(clave_mp):
-                            st.error(f"⚠️ PRESUPUESTO EXCEDIDO. El acumulado sería "
-                                     f"{pesos(nuevo_total)}, que supera lo contratado "
-                                     f"({pesos(cap)}). No se marcó como pagado. Para autorizarlo, "
-                                     f"captura la clave del Administrador.")
-                        else:
-                            num = int(consultar("SELECT COUNT(*) n FROM pagos_destajo "
-                                                "WHERE destajo_id=?", (did2,))["n"].iloc[0]) + 1
-                            ejecutar("UPDATE destajos SET pagado=?, metodo_pago=?, "
-                                     "datos_bancarios=?, banco_beneficiario=? WHERE id=?",
-                                     (nuevo_total, metodo_mp, mayus(datos_mp),
-                                      mayus(banco_mp), did2))
-                            ejecutar("INSERT INTO pagos_destajo(destajo_id,obra_id,contratista,"
-                                     "concepto,fecha,monto,metodo_pago,datos_bancarios,"
-                                     "banco_beneficiario) VALUES(?,?,?,?,?,?,?,?,?)",
-                                     (did2, obra_id, drow["contratista"], drow["concepto"],
-                                      f_pago.isoformat() + " " + ahora_mx().strftime("%H:%M"),
-                                      monto_pp, metodo_mp, mayus(datos_mp), mayus(banco_mp)))
-                            ejecutar("UPDATE prog_pagos SET estatus='Pagado', fecha_pago=?, "
-                                     "metodo_pago=?, datos_bancarios=?, banco_beneficiario=? "
-                                     "WHERE id=?", (f_pago.isoformat(), metodo_mp,
-                                      mayus(datos_mp), mayus(banco_mp), ppid))
-                            msg = (f"Pago marcado como PAGADO y cargado al destajo "
-                                   f"(Anticipo {num}).")
-                            if excede:
-                                msg += " (AUTORIZADO por el Administrador: rebasa lo contratado)"
-                            st.success(msg); st.rerun()
+                        bc = datos_contratista(d2["contratista"])
+                        datos_banc = " / ".join([x for x in [bc["cuenta"], bc["clabe"],
+                                                 bc["tarjeta"]] if x])
+                        banco_benef = " - ".join([x for x in [bc["banco"],
+                                                  bc["beneficiario"]] if x])
+                        num = int(consultar("SELECT COUNT(*) n FROM pagos_destajo WHERE "
+                                            "destajo_id=?", (did2,))["n"].iloc[0]) + 1
+                        pago_id = ejecutar_id(
+                            "INSERT INTO pagos_destajo(destajo_id,obra_id,contratista,concepto,"
+                            "fecha,monto,metodo_pago,datos_bancarios,banco_beneficiario) "
+                            "VALUES(?,?,?,?,?,?,?,?,?)",
+                            (did2, obra_id, d2["contratista"], d2["concepto"],
+                             f_pago.isoformat() + " " + ahora_mx().strftime("%H:%M"), monto_pp,
+                             metodo_mp, datos_banc, banco_benef))
+                        ejecutar("UPDATE destajos SET pagado=?, metodo_pago=?, datos_bancarios=?, "
+                                 "banco_beneficiario=? WHERE id=?",
+                                 (nuevo_total, metodo_mp, datos_banc, banco_benef, did2))
+                        ejecutar("UPDATE prog_pagos SET estatus='Pagado', fecha_pago=?, "
+                                 "metodo_pago=?, aplicado=1, pago_id=? WHERE id=?",
+                                 (f_pago.isoformat(), metodo_mp, pago_id, ppid))
+                        msg = f"Pago marcado como PAGADO y sumado al acumulado (Anticipo {num})."
+                        if excede:
+                            msg += " (AUTORIZADO por el Administrador: rebasa lo contratado)"
+                        st.success(msg); st.rerun()
+                elif nuevo_est != "Pagado" and aplicado:
+                    d2 = drow2.iloc[0]
+                    nuevo_total = max(0.0, float(d2["pagado"] or 0) - monto_pp)
+                    if pd.notna(pr["pago_id"]) and str(pr["pago_id"]).strip():
+                        ejecutar("DELETE FROM pagos_destajo WHERE id=?", (int(pr["pago_id"]),))
+                    ejecutar("UPDATE destajos SET pagado=? WHERE id=?", (nuevo_total, did2))
+                    ejecutar("UPDATE prog_pagos SET estatus=?, aplicado=0, pago_id=NULL WHERE id=?",
+                             (nuevo_est, ppid))
+                    st.success(f"Estatus cambiado a «{nuevo_est}». El monto se descontó del "
+                               f"acumulado del contratista."); st.rerun()
+                else:
+                    ejecutar("UPDATE prog_pagos SET estatus=? WHERE id=?", (nuevo_est, ppid))
+                    st.success(f"Estatus actualizado a «{nuevo_est}»."); st.rerun()
 
             st.markdown("##### 🗑️ Eliminar un pago programado")
             opc_del = [(f"{r['semana']} · {r['contratista']} · {r['concepto']} · "
